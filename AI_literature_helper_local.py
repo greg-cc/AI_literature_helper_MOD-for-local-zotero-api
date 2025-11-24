@@ -1,9 +1,8 @@
-# Modified from https://github.com/y-kuzn/AI_literature_helper for local Zotero. It grabs the abstract, creates a duplicate abstract for weighing match strenght, creates tags, and uploads em.  Gemini based.
 # -*- coding: utf-8 -*-
 import streamlit as st
 import requests, json, re, os, io
 import xml.etree.ElementTree as ET
-# from pyzotero import zotero # Cloud API dependency removed
+from pyzotero import zotero # pyzotero is now imported for duplicate checking
 import fitz # PyMuPDF
 from time import sleep
 from requests import RequestException
@@ -16,7 +15,7 @@ logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s', st
 
 # --- GLOBAL API CONSTANTS for Backoff (Used in gemini_json) ---
 MAX_RETRIES = 5
-MAX_DELAY_SECONDS = 60  # Initial delay starts low, max delay hits this limit
+MAX_DELAY_SECONDS = 60 # Initial delay starts low, max delay hits this limit
 INITIAL_DELAY_SECONDS = 5
 RATE_LIMIT_STATUS_CODE = 429
 # ============================
@@ -37,7 +36,7 @@ try:
     from google import genai
     client = genai.Client(api_key=GEMINI_API_KEY)
 except Exception as e:
-    client = None 
+    client = None
     # Store the exception details for logging
     if not GEMINI_API_KEY:
         GEMINI_CLIENT_INIT_ERROR = f"Client failed to initialize: GEMINI_API_KEY is empty."
@@ -49,36 +48,36 @@ except Exception as e:
 # --- MODEL OPTIONS FOR UI (Restored Verbiage) ---
 MODEL_OPTIONS = {
     "models/gemini-2.5-flash (Default)": {
-        "model_id": "gemini-2.5-flash", 
-        "description": "General purpose, fast, large context. Default model (70B parameters, info: 7 GB)."
+        "model_id": "gemini-2.5-flash",
+        "description": "General purpose, fast, large context. Default model (70B parameters, info: **7 GB**)."
     },
     "models/gemini-2.5-pro (Complex Tasks)": {
-        "model_id": "gemini-2.5-pro", 
-        "description": "Highest reasoning capacity, suitable for complex annotations. Separate, smaller quota (100B+ parameters, info: 15 GB)."
+        "model_id": "gemini-2.5-pro",
+        "description": "Highest reasoning capacity, suitable for complex annotations. Separate, smaller quota (100B+ parameters, info: **15 GB**)."
     },
     "models/gemini-flash-lite-latest (Quota Fallback)": {
-        "model_id": "models/gemini-flash-lite-latest", 
-        "description": "Optimized for high throughput and cost efficiency. Good quota fallback (info: 700 MB)."
+        "model_id": "models/gemini-flash-lite-latest",
+        "description": "Optimized for high throughput and cost efficiency. Good quota fallback (info: **700 MB**)."
     },
     "models/gemini-2.5-flash-lite (Quota Fallback)": {
-        "model_id": "models/gemini-2.5-flash-lite", 
-        "description": "High throughput and cost-efficient version. Good quota fallback (info: 700 MB)."
+        "model_id": "models/gemini-2.5-flash-lite",
+        "description": "High throughput and cost-efficient version. Good quota fallback (info: **700 MB**)."
     },
     "gemma-3-1b-it (Open Model, Text Only)": {
-        "model_id": "gemma-3-1b-it", 
-        "description": "Open model (1.4B parameters). Best for simple text generation when Gemini quota is exhausted (info: 1.5 GB)."
+        "model_id": "gemma-3-1b-it",
+        "description": "Open model (1.4B parameters). Best for simple text generation when Gemini quota is exhausted (info: **1.5 GB**)."
     },
     "gemma-3-4b-it (Open Model, Text Only)": {
-        "model_id": "gemma-3-4b-it", 
-        "description": "Open model (4B parameters). More capable than 1B, for text tasks (info: 4 GB)."
+        "model_id": "gemma-3-4b-it",
+        "description": "Open model (4B parameters). More capable than 1B, for text tasks (info: **4 GB**)."
     },
     "gemma-3-12b-it (Open Model, Text Only)": {
-        "model_id": "gemma-3-12b-it", 
-        "description": "Open model (12B parameters). Highly capable text model (info: 12 GB)."
+        "model_id": "gemma-3-12b-it",
+        "description": "Open model (12B parameters). Highly capable text model (info: **12 GB**)."
     },
     "gemma-3-27b-it (Open Model, Text Only)": {
-        "model_id": "gemma-3-27b-it", 
-        "description": "Open model (27B parameters). Largest open model for complex text tasks (info: 27 GB)."
+        "model_id": "gemma-3-27b-it",
+        "description": "Open model (27B parameters). Largest open model for complex text tasks (info: **27 GB**)."
     },
 }
 
@@ -100,7 +99,7 @@ def _list_and_log_models(client):
 def log_gemini_status(client, selected_model_id):
     """Tries to get a simple list of models to confirm the API key is active.
     Logs status and model list to the console (sys.stdout)."""
-    
+
     if not client:
         # New: If client initialization failed, display stored error message
         logging.error("=========================================================")
@@ -115,7 +114,7 @@ def log_gemini_status(client, selected_model_id):
         logging.info("=========================================================")
         logging.info("GEMINI STATUS: API Key is successfully authenticated.")
         logging.info(f"CURRENT MODEL FOR ANNOTATION: {selected_model_id}")
-        
+
         # Log the detailed model list (as requested by the user)
         _list_and_log_models(client)
 
@@ -130,23 +129,36 @@ def log_gemini_status(client, selected_model_id):
         logging.error("=========================================================")
 
 
-SLEEP = 0.08  # pacing for retries/backoff
+SLEEP = 0.08 # pacing for retries/backoff
 PREFS_FILE = "prefs.json"
 
 # ============================
 # PREFERENCES (saved locally)
 # ============================
 def load_prefs():
+    # MODIFIED: Added "allow_duplicates" to persistence
     if not os.path.exists(PREFS_FILE):
-        return {"topics": [], "authors": []}
+        return {"topics": [], "authors": [], "collection_id": "", "library_id": "", "allow_duplicates": False}
     try:
-        return json.load(open(PREFS_FILE))
+        data = json.load(open(PREFS_FILE))
+        # Ensure all fields are present, using defaults if missing from old file
+        data["collection_id"] = data.get("collection_id", "")
+        data["library_id"] = data.get("library_id", "")
+        data["allow_duplicates"] = data.get("allow_duplicates", False)
+        return data
     except Exception:
-        return {"topics": [], "authors": []}
+        return {"topics": [], "authors": [], "collection_id": "", "library_id": "", "allow_duplicates": False}
 
-def save_prefs(topics, authors):
+def save_prefs(topics, authors, collection_id, library_id, allow_duplicates):
+    # MODIFIED: Added allow_duplicates argument
     with open(PREFS_FILE, "w") as f:
-        json.dump({"topics": topics, "authors": authors}, f)
+        json.dump({
+            "topics": topics, 
+            "authors": authors, 
+            "collection_id": collection_id, 
+            "library_id": library_id,
+            "allow_duplicates": allow_duplicates
+        }, f)
 
 prefs = load_prefs()
 
@@ -166,19 +178,23 @@ search_mode = st.radio(
 )
 
 # Source selector ONLY for Keyword Search (removed for Paste mode per request)
+# MODIFIED DEFAULT: index=2 sets default to "Both"
 search_source = st.selectbox(
     "📡 Choose search source",
-    ["Semantic Scholar", "PubMed", "Both"]
+    ["Semantic Scholar", "PubMed", "Both"],
+    index=2
 ) if search_mode == "Keyword Search" else None
 
-max_results = st.slider("📄 Max articles to fetch:", 5, 100, 20, 1)
+# MODIFIED DEFAULT: value=90
+max_results = st.slider("📄 Max articles to fetch:", 5, 100, 90, 1)
 
-# Unified relevance is score3 (0..3)
-min_score3 = st.slider("⭐ Minimum AI relevance score3 to save to Zotero (0–3):", 0, 3, 2, 1)
+# MODIFIED DEFAULT: value=1
+min_score3 = st.slider("⭐ Minimum AI relevance score3 to save to Zotero (0–3):", 0, 3, 1, 1)
 
 if search_mode == "Keyword Search":
     user_prompt = st.text_input("🔍 Enter your research topic or keywords:")
-    use_boolean = st.checkbox("🔤 Convert to Boolean query (AI-optimized)")
+    # MODIFIED DEFAULT: value=False
+    use_boolean = st.checkbox("🔤 Convert to Boolean query (AI-optimized)", value=False)
 elif search_mode == "Paste citation / page text":
     paste_text = st.text_area("📋 Paste citation(s) or Google Scholar results / page text:", height=220)
 else:
@@ -188,11 +204,12 @@ else:
 st.markdown("---")
 st.subheader("🤖 AI Annotation Model Selector")
 
+# MODIFIED DEFAULT: index=3 sets default to "models/gemini-2.5-flash-lite (Quota Fallback)"
 model_key = st.selectbox(
     "Choose Gemini Model (Select a fallback if quota exhausted):",
     options=list(MODEL_OPTIONS.keys()),
     format_func=lambda k: f"{k} ({MODEL_OPTIONS[k]['description'].split('(')[-1].strip(')')})",
-    index=0,
+    index=3,
     help="Select a model. The Lite/Gemma options have separate quotas and can be used if the default is rate-limited."
 )
 selected_model_info = MODEL_OPTIONS[model_key]
@@ -201,38 +218,100 @@ st.caption(f"Model ID: **`{selected_model_id}`**. Description: {selected_model_i
 st.markdown("---")
 # --- End Model Selector UI ---
 
+# --- Zotero Inputs (for pyzotero initialization and action) ---
+
+# MODIFIED DEFAULT: value=True
+add_to_zotero = st.checkbox("📥 Add articles to Zotero", value=True)
+
+# Library ID input (required for pyzotero duplicate check)
+user_zotero_id = st.text_input(
+    "Zotero User ID (Library ID)", 
+    value=prefs.get("library_id", ""),
+    help="Your numeric Zotero User ID. Required for the pyzotero duplicate check."
+)
+
+# RE-ADDED: Allow Duplicates Checkbox, persistent via prefs.json
+allow_duplicates = st.checkbox(
+    "⚠️ Allow Zotero duplicates", 
+    value=prefs.get("allow_duplicates", False),
+    help="If checked, papers will be added even if a matching title is found in Zotero."
+)
+
+st.caption("ℹ️ Zotero API Key field is omitted as local posting is used.")
+
+# --- Sidebar Preferences ---
 with st.sidebar:
     st.header("🔖 Preferences")
     topics_txt = st.text_input("Priority Topics (comma-separated)", ", ".join(prefs.get("topics", [])))
     authors_txt = st.text_input("Priority Authors (comma-separated)", ", ".join(prefs.get("authors", [])))
+
+    # Collection ID input (visible and persistent)
+    user_zotero_collection = st.text_input("Zotero Collection ID", value=prefs.get("collection_id", ""))
+
     if st.button("💾 Save Preferences"):
-        save_prefs([t.strip() for t in topics_txt.split(",") if t.strip()],
-                   [a.strip() for a in authors_txt.split(",") if a.strip()])
+        # Passed all persistent variables, including the current state of allow_duplicates
+        save_prefs(
+            [t.strip() for t in topics_txt.split(",") if t.strip()],
+            [a.strip() for a in authors_txt.split(",") if a.strip()],
+            user_zotero_collection,
+            user_zotero_id,
+            allow_duplicates # Save the current state of the checkbox
+        )
         st.sidebar.success("Saved preferences.")
 
-add_to_zotero = st.checkbox("📥 Add articles to Zotero")
-# Cloud API inputs remain but are unused for local posting, zot is set to None later
-user_zotero_key = st.text_input("Zotero API Key", disabled=True)
-user_zotero_id = st.text_input("Zotero User ID", disabled=True)
-user_zotero_collection = st.text_input("Zotero Collection ID") # Enabled per user request
-allow_duplicates = st.checkbox("⚠️ Allow Zotero duplicates", value=False, disabled=True)
-st.caption("ℹ️ Local posting is used. API Key/User ID inputs are ignored, and duplicate check is disabled.")
+
+# ============================
+# PYZOtero HELPERS (for Duplicate Check)
+# ============================
+
+@st.cache_resource
+def init_pyzotero_local(library_id):
+    """Initializes and returns a pyzotero client for local access."""
+    if not library_id or not library_id.isdigit():
+        return None, "Invalid Zotero User ID (Library ID)."
+    try:
+        # Use a dummy key/API type; local=True handles the connection
+        # to the running Zotero 7 desktop app via 127.0.0.1:23119
+        zot = zotero.Zotero(library_id, 'user', 'DUMMY_KEY', local=True)
+        # Verify connection by fetching a simple item count
+        zot.count_items()
+        return zot, None
+    except Exception as e:
+        logging.error(f"Failed to initialize pyzotero local connection: {e}")
+        return None, f"Zotero API connection failed. Is Zotero Desktop running? ({e.__class__.__name__})"
+
+def check_zotero_duplicate(zot, title):
+    """Checks the local Zotero library for a duplicate title."""
+    if not zot:
+        return False, "Zotero client not available."
+    try:
+        # Search by title; items should be sorted by date descending by default
+        items = zot.items(q=title.strip(), limit=5)
+        
+        # Simple check: look for an exact or near-exact title match
+        for item in items:
+            item_title = item.get('data', {}).get('title', '').strip()
+            if item_title.lower() == title.strip().lower():
+                 return True, f"Duplicate found by exact title: {title}"
+        
+        return False, "No duplicate found."
+    except Exception as e:
+        logging.warning(f"Zotero duplicate check failed (pyzotero query error): {e}")
+        return False, f"Zotero query error: {e}"
 
 
 # ============================
-# LOCAL ZOTERO ACTION (New Functionality)
+# LOCAL ZOTERO ACTION (Connector API)
 # ============================
-def save_to_zotero_local(item_data, timeout_seconds=600): # Changed 45 to 600
+def save_to_zotero_local(item_data, timeout_seconds=600):
     """
-    Pushes a record to the running Zotero instance via the Connector endpoint. 
-    Requires Zotero Desktop running.
+    Pushes a record to the running Zotero instance via the Connector endpoint.
     """
     connector_url = "http://127.0.0.1:23119/connector/saveItems"
     payload = { "items": [item_data] }
-    
+
     try:
-        # TIMEOUT MODIFIED to 600 seconds (10 minutes)
-        resp = requests.post(connector_url, json=payload, timeout=timeout_seconds) # Changed 5 to timeout_seconds
+        resp = requests.post(connector_url, json=payload, timeout=timeout_seconds)
         resp.raise_for_status()
         return True, "Item successfully sent to local Zotero instance."
     except requests.exceptions.ConnectionError:
@@ -242,7 +321,7 @@ def save_to_zotero_local(item_data, timeout_seconds=600): # Changed 45 to 600
 
 
 # ============================
-# HELPERS
+# HELPERS (Remaining)
 # ============================
 OPERATORS = {"and": "AND", "or": "OR", "not": "NOT"}
 
@@ -361,7 +440,7 @@ def gemini_json(prompt: str, model: str) -> dict | list:
                 config={"response_mime_type": "application/json"},
             )
             txt = resp.text or ""
-            
+
             # Successful response, try to parse JSON
             try:
                 return json.loads(txt)
@@ -378,11 +457,11 @@ def gemini_json(prompt: str, model: str) -> dict | list:
         except Exception as e:
             # Check if this is a 429 Rate Limit error (ResourceExhausted)
             error_message = str(e)
-            
+
             # The client library often embeds the status code in the exception message/attributes on failure
             if "ResourceExhausted" in error_message or "429" in error_message:
                 logging.warning(f"RATE LIMIT (429) hit for {model}. Attempt {attempt}/{MAX_RETRIES}.")
-                
+
                 if attempt == MAX_RETRIES:
                     return {"error": "RATE_LIMIT_EXHAUSTED", "details": error_message}
 
@@ -391,14 +470,14 @@ def gemini_json(prompt: str, model: str) -> dict | list:
                 delay = delay * 2
                 jitter = random.uniform(0, 1) * wait_time
                 wait_duration = wait_time + jitter
-                
+
                 logging.info(f"Pausing for {wait_duration:.2f} seconds before retrying...")
                 sleep(wait_duration)
-                
+
             else:
                 # This is a different, unhandled API error (e.g., Auth, Invalid Model ID)
                 return {"error": "API_CONNECTION_ERROR", "details": error_message}
-                
+
     return {"error": "API_FAILURE_UNKNOWN"}
 
 
@@ -409,11 +488,11 @@ Return JSON {{"boolean_query": "...", "keywords": [], "year_from": null, "year_t
 Topic: {user_query}
 Priority topics: {prefs.get('topics')}
 """, model)
-    
+
     if data and "error" in data:
         logging.error(f"Boolean Query Failed: {data['error']} - {data.get('details', data.get('raw_text', ''))[:100]}...")
         return {"boolean_query": build_boolean_query_simple(user_query), "keywords": [], "year_from": None, "year_to": None}
-    
+
     out = {"boolean_query": build_boolean_query_simple(user_query), "keywords": [], "year_from": None, "year_to": None}
     if isinstance(data, dict):
         out["boolean_query"] = data.get("boolean_query") or out["boolean_query"]
@@ -440,7 +519,7 @@ Text:
 
 Return strictly a JSON array.
 """, model)
-    
+
     if data and "error" in data:
         logging.error(f"Extraction Failed: {data['error']} - {data.get('details', data.get('raw_text', ''))[:100]}...")
         return []
@@ -463,7 +542,7 @@ Return strictly a JSON array.
                 doi = m.group(0) if m else doi.strip()
             out.append({"title": title, "authors": authors, "year": year, "doi": doi})
         return out
-        
+
     # Log failure to extract references
     # Note: 'raw_data' is not defined here. Assuming 'data' means the unparsed JSON output
     logging.error(f"Extraction Failed! Model returned non-list data during reference extraction. Raw data: {data}")
@@ -499,15 +578,15 @@ Output JSON only.
 """
     data = gemini_json(prompt, model)
     abstract, tags, score3 = "", [], 0
-    
+
     if data and "error" in data:
         error_msg = data['error']
         details = data.get('details', '')
         raw_text = data.get('raw_text', '')
-        
+
         # Log the failure for debugging
         logging.error(f"Annotation Failure ({model}): {error_msg}. Details: {details[:100]}")
-        
+
         if error_msg == "RATE_LIMIT_EXHAUSTED":
             return f"RATE LIMIT EXHAUSTED for model {model}. Please try a different model or wait.", [], 0
         elif error_msg == "API_CONNECTION_ERROR" or error_msg == "GEMINI_CLIENT_UNINITIALIZED":
@@ -534,7 +613,7 @@ Output JSON only.
     score_tag = f"ai score-{max(0, min(3, score3))}"
     if score_tag not in tags:
         tags.append(score_tag)
-        
+
     return abstract.strip(), tags, max(0, min(3, score3))
 
 # ============================
@@ -805,10 +884,10 @@ def google_search_fallback(query: str):
 # MAIN ACTION
 # ============================
 if st.button("🚀 Go"):
-    
+
     # 1. Log Gemini Status before starting the main process
     log_gemini_status(client, selected_model_id)
-    
+
     progress = st.progress(0)
     status = st.empty()
 
@@ -976,8 +1055,12 @@ if st.button("🚀 Go"):
                     papers_meta = ss
                     progress.progress(70)
 
-        # Initialize Zotero (Cloud API setup) - Now bypassed for local posting
-        zot = None
+        # Initialize pyzotero client once for duplicate checks
+        zot_client, zot_error = init_pyzotero_local(user_zotero_id)
+        if zot_error:
+            # We don't stop execution, but warn the user that duplicate checks won't run
+            st.warning(f"Zotero Duplicate Check Warning: {zot_error}")
+
 
         # If nothing found — friendly message
         if not papers_meta:
@@ -987,8 +1070,8 @@ if st.button("🚀 Go"):
             st.caption("Try tweaking the query or switching modes. Even librarians have off days.")
             st.stop()
 
-        # Render + Gemini analysis (UNIFIED)
-        status.info("🧪 Analyzing and annotating… (Sequential API Calls)")
+        # Render + Annotate Loop (MODIFIED EXECUTION ORDER)
+        status.info("🧪 Analyzing, annotating, and checking duplicates…")
         progress.progress(75)
 
         # Map Zotero threshold: score3 (0..3)
@@ -1005,10 +1088,27 @@ if st.button("🚀 Go"):
             venue = paper.get("venue")
             year = paper.get("year")
 
-            # Pull PDF text when useful
+            # --- EARLY CHECK: Zotero Duplicates & Transfer Conditions ---
+            if add_to_zotero:
+                # 1. CHECK RELEVANCE SCORE FIRST (Low-cost check)
+                # Since we don't have score3 yet, we rely on the title for now, 
+                # but we can check the score threshold *after* annotation.
+                
+                # 2. DUPLICATE CHECK (Time/Resource consuming)
+                if not allow_duplicates:
+                    is_duplicate, dup_msg = check_zotero_duplicate(zot_client, title)
+                    if is_duplicate:
+                        st.info(f"⚠️ Skipped AI/Transfer: {dup_msg}")
+                        # Skip remaining loop steps (AI call and posting)
+                        continue
+                    if "Zotero client not available" in dup_msg:
+                        # Log warning, but don't stop (already logged above, but good practice to check)
+                        pass
+            
+            # Pull PDF text when useful (Relatively high cost, done before AI)
             pdf_text = extract_pdf_text(pdf_url or url)
 
-            # --- Gemini Annotation (Sequential, Backoff-Enabled) ---
+            # --- AI ANNOTATION CALL (Highest Cost Operation) ---
             user_query = (
                 user_prompt if search_mode == 'Keyword Search' else
                 (title or paste_text if search_mode == 'Paste citation / page text' else url_or_doi)
@@ -1018,21 +1118,20 @@ if st.button("🚀 Go"):
             abstract_ai, tags, score3 = gemini_annotate_paper(
                 title, authors_info, snippet, pdf_text, url, user_query, selected_model_id
             ) if client else ("GEMINI API KEY IS MISSING or invalid. No annotation performed.", [], 0)
-            
-            # Update progress bar only for the loop step
+
+            # Update progress bar
             progress.progress(75 + int((i / len(papers_meta)) * 20))
 
+            # --- UI RENDERING ---
             with st.expander(f"📄 {title or 'Untitled'} (Score: {score3})", expanded=True):
                 if authors_info:
                     st.markdown(f"**Authors:** {authors_info}")
                 if venue or year:
                     st.markdown(f"**Venue / Year:** {venue or '—'} — {year or '—'}")
-                
-                # --- Source Abstract Display ---
+
+                # --- Abstract Display ---
                 if snippet:
                     st.markdown(f"**Abstract (source):** {snippet}")
-                
-                # --- AI Abstract/Error Display ---
                 if abstract_ai:
                     if abstract_ai.startswith("RATE LIMIT EXHAUSTED") or abstract_ai.startswith("API CONNECTION_ERROR") or abstract_ai.startswith("Gemini returned") or abstract_ai.startswith("API FAILURE") or abstract_ai.startswith("Unknown API Failure"):
                         st.error(f"**AI Abstract Failure:** {abstract_ai}")
@@ -1051,32 +1150,45 @@ if st.button("🚀 Go"):
                         st.markdown(f"[🏫 NTU Access (style 1)]({inst1})")
                     if inst2:
                         st.markdown(f"[🏫 NTU Access (style 2)]({inst2})")
-                
+
                 if tags:
                     st.markdown("**🏷️ Tags:** " + ", ".join(tags))
                 st.markdown(f"**AI Relevance (0–3):** `{score3}`")
-                
-                # --- LOCAL ZOTERO POSTING ---
+
+                # --- LOCAL ZOTERO POSTING (Now inside the check for efficiency) ---
                 if add_to_zotero and (score3 >= zotero_threshold_score3):
+                    
                     doi_or_url = f"https://doi.org/{doi}" if doi else url
                     proxy_url = with_ntu_proxy(doi_or_url, style=1) or with_ntu_proxy(doi_or_url, style=2) or url
 
-                    # Combine and label abstracts for the single Zotero field.
+                    # 1. ABSTRACT CONTENT LOGIC (Hybrid if AI is 40% longer)
                     abstract_content = ""
-                    if abstract_ai and snippet and not abstract_ai.startswith("RATE LIMIT EXHAUSTED"):
-                        abstract_content = f"AI SUMMARY:\n{abstract_ai}\n\n---\n\nSOURCE SNIPPET:\n{snippet}"
-                    elif snippet:
-                        abstract_content = f"SOURCE SNIPPET:\n{snippet}"
-                    elif abstract_ai and not abstract_ai.startswith("RATE LIMIT EXHAUSTED"):
-                         abstract_content = f"AI SUMMARY:\n{abstract_ai}"
+                    abstract_ai_content = ""
                     
+                    # Check if AI content is significantly better (at least 40% longer)
+                    if abstract_ai and not abstract_ai.startswith("RATE LIMIT EXHAUSTED"):
+                        # Only apply the length check if a snippet is present
+                        if snippet:
+                            if len(abstract_ai) > (len(snippet) * 1.4):
+                                abstract_ai_content = f"AI EXPANDED SUMMARY:\n{abstract_ai}"
+                            
+                        elif len(abstract_ai) > 10: # Use AI as fallback if no snippet but AI is meaningful
+                             abstract_ai_content = f"AI SUMMARY:\n{abstract_ai}"
 
-                    # Item payload for local Connector posting.
+                    # Prioritize snippet, append expanded AI content if applicable
+                    if snippet:
+                        abstract_content += f"SOURCE ABSTRACT:\n{snippet}"
+                        if abstract_ai_content:
+                            abstract_content += "\n\n---\n\n" + abstract_ai_content
+                    elif abstract_ai_content:
+                        abstract_content = abstract_ai_content
+                    
+                    # 2. ITEM POSTING
                     item = {
                         'itemType': 'journalArticle',
                         'title': title,
                         'creators': parse_authors(authors_info),
-                        'abstractNote': abstract_content,  
+                        'abstractNote': abstract_content,
                         'tags': [{'tag': t} for t in (tags or [])],
                         'url': proxy_url,
                         'date': str(year) if year else None,
@@ -1084,7 +1196,7 @@ if st.button("🚀 Go"):
                     }
                     item = {k: v for k, v in item.items() if v not in (None, "" or [])}
 
-                    # We are passing the item to save_to_zotero_local which now uses a 45s timeout
+                    # The save_to_zotero_local call uses the new 10-minute timeout (600 seconds)
                     success, msg = save_to_zotero_local(item)
                     if success:
                         st.success(f"✅ Added to Local Zotero (score3={score3})")
