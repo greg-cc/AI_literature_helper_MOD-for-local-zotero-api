@@ -27,8 +27,8 @@ st.set_page_config(page_title="📚 AI Literature Helper", page_icon="🤖")
 # --- FIXED SECTION START ---
 # keys are now assigned directly as strings
 SEMANTIC_SCHOLAR_API_KEY = ""
-GEMINI_API_KEY = "-" # Replaced with empty string as agreed. USER MUST REPLACE THIS.
-NCBI_EMAIL = "@gmail."
+GEMINI_API_KEY = "" # Replaced with empty string as agreed. USER MUST REPLACE THIS.
+NCBI_EMAIL = "@gmail.com"
 NCBI_API_KEY = ""
 
 # client now uses the variable defined above
@@ -99,6 +99,12 @@ def _list_and_log_models(client):
 def log_gemini_status(client, selected_model_id):
     """Tries to get a simple list of models to confirm the API key is active.
     Logs status and model list to the console (sys.stdout)."""
+    
+    # MODIFIED: Only run this logging once per session
+    if "models_logged" not in st.session_state:
+        st.session_state["models_logged"] = True
+    else:
+        return
 
     if not client:
         # New: If client initialization failed, display stored error message
@@ -218,17 +224,10 @@ st.caption(f"Model ID: **`{selected_model_id}`**. Description: {selected_model_i
 st.markdown("---")
 # --- End Model Selector UI ---
 
-# --- Zotero Inputs (for pyzotero initialization and action) ---
+# --- Zotero Inputs in Main Area ---
 
 # MODIFIED DEFAULT: value=True
 add_to_zotero = st.checkbox("📥 Add articles to Zotero", value=True)
-
-# Library ID input (required for pyzotero duplicate check)
-user_zotero_id = st.text_input(
-    "Zotero User ID (Library ID)", 
-    value=prefs.get("library_id", ""),
-    help="Your numeric Zotero User ID. Required for the pyzotero duplicate check."
-)
 
 # RE-ADDED: Allow Duplicates Checkbox, persistent via prefs.json
 allow_duplicates = st.checkbox(
@@ -239,17 +238,27 @@ allow_duplicates = st.checkbox(
 
 st.caption("ℹ️ Zotero API Key field is omitted as local posting is used.")
 
-# --- Sidebar Preferences ---
+# --- Sidebar Preferences (All persistent inputs are moved here) ---
 with st.sidebar:
     st.header("🔖 Preferences")
-    topics_txt = st.text_input("Priority Topics (comma-separated)", ", ".join(prefs.get("topics", [])))
-    authors_txt = st.text_input("Priority Authors (comma-separated)", ", ".join(prefs.get("authors", [])))
-
+    
+    # Zotero User ID (Library ID) input moved to sidebar
+    user_zotero_id = st.text_input(
+        "Zotero User ID (Library ID)", 
+        value=prefs.get("library_id", ""),
+        help="Your numeric Zotero User ID. Required for the pyzotero duplicate check."
+    )
+    
     # Collection ID input (visible and persistent)
     user_zotero_collection = st.text_input("Zotero Collection ID", value=prefs.get("collection_id", ""))
 
+    st.markdown("---")
+    st.markdown("Other Filters:")
+    topics_txt = st.text_input("Priority Topics (comma-separated)", ", ".join(prefs.get("topics", [])))
+    authors_txt = st.text_input("Priority Authors (comma-separated)", ", ".join(prefs.get("authors", [])))
+
     if st.button("💾 Save Preferences"):
-        # Passed all persistent variables, including the current state of allow_duplicates
+        # Passed all persistent variables
         save_prefs(
             [t.strip() for t in topics_txt.split(",") if t.strip()],
             [a.strip() for a in authors_txt.split(",") if a.strip()],
@@ -1090,11 +1099,7 @@ if st.button("🚀 Go"):
 
             # --- EARLY CHECK: Zotero Duplicates & Transfer Conditions ---
             if add_to_zotero:
-                # 1. CHECK RELEVANCE SCORE FIRST (Low-cost check)
-                # Since we don't have score3 yet, we rely on the title for now, 
-                # but we can check the score threshold *after* annotation.
-                
-                # 2. DUPLICATE CHECK (Time/Resource consuming)
+                # 1. DUPLICATE CHECK (Time/Resource consuming)
                 if not allow_duplicates:
                     is_duplicate, dup_msg = check_zotero_duplicate(zot_client, title)
                     if is_duplicate:
@@ -1183,6 +1188,16 @@ if st.button("🚀 Go"):
                     elif abstract_ai_content:
                         abstract_content = abstract_ai_content
                     
+                    # APPEND RELEVANCE SCORE AND QUERY TO ABSTRACT CONTENT (NEW REQUIREMENT)
+                    relevance_and_query_line = f"AI Relevance (0–3): {score3} | Search Query: {user_query}"
+
+                    if abstract_content:
+                        abstract_content += "\n\n" + relevance_and_query_line
+                    else:
+                        # If no abstract content was generated at all, just use the metadata line
+                        abstract_content = relevance_and_query_line
+
+
                     # 2. ITEM POSTING
                     item = {
                         'itemType': 'journalArticle',
