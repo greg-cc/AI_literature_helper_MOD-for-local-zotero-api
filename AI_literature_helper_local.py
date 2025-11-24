@@ -28,7 +28,7 @@ st.set_page_config(page_title="📚 AI Literature Helper", page_icon="🤖")
 # keys are now assigned directly as strings
 SEMANTIC_SCHOLAR_API_KEY = ""
 GEMINI_API_KEY = "" # Replaced with empty string as agreed. USER MUST REPLACE THIS.
-NCBI_EMAIL = "@gmail.com"
+NCBI_EMAIL = "@gmail."
 NCBI_API_KEY = ""
 
 # client now uses the variable defined above
@@ -193,6 +193,39 @@ search_source = st.selectbox(
 
 # MODIFIED DEFAULT: value=90
 max_results = st.slider("📄 Max articles to fetch:", 5, 100, 90, 1)
+
+# --- NEW: Cycle Management Inputs (Updated Max Pause Time) ---
+st.markdown("---")
+st.subheader("🔄 API Quota Cycle Management")
+col1, col2 = st.columns(2)
+
+with col1:
+    num_cycles = st.number_input(
+        "🔄 Number of total cycles to run:",
+        min_value=1,
+        max_value=100,
+        value=1,
+        step=1,
+        help="Runs the entire paper acquisition/annotation process this many times in sequence."
+    )
+
+with col2:
+    pause_type = st.radio(
+        "Pause Type:",
+        ["Timed Delay", "Manual Button"],
+        index=0,
+        help="Choose between an automatic wait period or a manual pause requiring a click to continue."
+    )
+
+cycle_pause_minutes = None
+if pause_type == "Timed Delay":
+    cycle_pause_minutes = st.slider(
+        "⏸️ Pause between cycles (minutes):",
+        5, 3000, 1440, 5, # Max changed to 3000 minutes (50 hours)
+        help="The time to pause between each full cycle to allow the API daily/48hr quota to reset. 1440 minutes = 24 hours."
+    )
+st.markdown("---")
+# --- End Cycle Management Inputs ---
 
 # MODIFIED DEFAULT: value=1
 min_score3 = st.slider("⭐ Minimum AI relevance score3 to save to Zotero (0–3):", 0, 3, 1, 1)
@@ -553,7 +586,6 @@ Return strictly a JSON array.
         return out
 
     # Log failure to extract references
-    # Note: 'raw_data' is not defined here. Assuming 'data' means the unparsed JSON output
     logging.error(f"Extraction Failed! Model returned non-list data during reference extraction. Raw data: {data}")
     return []
 
@@ -889,112 +921,92 @@ def google_search_fallback(query: str):
     except Exception:
         return []
 
-# ============================
-# MAIN ACTION
-# ============================
-if st.button("🚀 Go"):
 
-    # 1. Log Gemini Status before starting the main process
+# ============================
+# MAIN ACTION: ENCAPSULATED LOGIC FOR ONE CYCLE
+# ============================
+
+def run_single_cycle(cycle_num, total_cycles, search_mode, max_results, min_score3, selected_model_id, add_to_zotero, allow_duplicates, user_zotero_id, progress, status, user_prompt=None, use_boolean=None, search_source=None, paste_text=None, url_or_doi=None, user_zotero_collection=None):
+    """Encapsulates the entire paper acquisition and annotation logic for one cycle."""
+
+    status.info(f"--- 🔄 Starting Cycle **{cycle_num}/{total_cycles}** ---")
+    progress.progress(0)
+    
+    # 1. Log Gemini Status (only runs once per session, controlled internally)
     log_gemini_status(client, selected_model_id)
 
-    progress = st.progress(0)
-    status = st.empty()
-
     papers_meta = []
+    
     try:
         # 1) KEYWORD SEARCH
         if search_mode == "Keyword Search":
             if not user_prompt or not user_prompt.strip():
                 st.warning("Please enter a research topic.")
-                st.stop()
+                return 
 
-            status.info("🧠 Preparing query…")
+            status.info("🧠 Preparing query with Gemini…")
+            
+            # Re-generate the effective query here for consistent execution within the cycle
             if use_boolean:
                 b = gemini_boolean_query(user_prompt, selected_model_id)
                 effective_query = b.get("boolean_query") or build_boolean_query_simple(user_prompt)
-                if b.get("keywords"):
-                    st.caption("Keywords: " + ", ".join((b.get("keywords") or [])[:12]))
-                if b.get("year_from") or b.get("year_to"):
-                    st.caption(f"Years: {b.get('year_from')}–{b.get('year_to')}")
+                st.caption(f"Cycle {cycle_num} Query: `{effective_query}`")
             else:
                 effective_query = build_boolean_query_simple(user_prompt)
-
-            # Editable query box
-            effective_query = st.text_area("✏️ Editable search query (you can tweak before searching):", effective_query)
+            
             progress.progress(10)
 
             agg = []
             if search_source in ("Semantic Scholar", "Both"):
-                status.info("🔎 Searching Semantic Scholar…")
-                try:
-                    agg.extend(search_semantic_scholar(effective_query, limit=max_results))
-                except Exception as e:
-                    st.warning(f"Semantic Scholar failed: {e}")
+                status.info(f"🔎 Cycle {cycle_num}: Searching Semantic Scholar…")
+                agg.extend(search_semantic_scholar(effective_query, limit=max_results))
                 progress.progress(30)
 
             if search_source in ("PubMed", "Both"):
-                status.info("🧬 Searching PubMed…")
-                try:
-                    agg.extend(search_pubmed(effective_query, limit=max_results))
-                except Exception as e:
-                    st.warning(f"PubMed failed: {e}")
+                status.info(f"🧬 Cycle {cycle_num}: Searching PubMed…")
+                agg.extend(search_pubmed(effective_query, limit=max_results))
                 progress.progress(50)
 
-            status.info("📦 Combining results…")
+            status.info(f"📦 Cycle {cycle_num}: Combining results…")
             papers_meta = _take(dedupe_results(agg), max_results)
             progress.progress(60)
 
-        # 2) PASTE CITATION / TEXT (Gemini extraction + PubMed + Google fallback; DOI→S2 if available)
+        # 2) PASTE CITATION / TEXT
         elif search_mode == "Paste citation / page text":
             if not paste_text.strip():
                 st.warning("Please paste citation(s) or text.")
-                st.stop()
+                return 
 
-            status.info("🧾 Extracting references with Gemini…")
+            status.info(f"🧾 Cycle {cycle_num}: Extracting references with Gemini…")
             refs = gemini_extract_from_text(paste_text, selected_model_id)
             progress.progress(30)
 
             if not refs:
-                status.warning("")
-                progress.progress(100)
                 st.error("😅 We squinted at every reference style… but found nada.")
-                st.caption("Try another copy/paste (e.g., select all items on the Google Scholar results page).")
-                st.stop()
+                return 
 
-            status.info("🔎 Enriching references…")
+            status.info(f"🔎 Cycle {cycle_num}: Enriching references…")
             collected = []
             for r in refs[:max_results]:
+                # ... (Existing reference enrichment logic - kept compact for brevity here)
                 title, authors, year, doi = r.get("title"), r.get("authors"), r.get("year"), r.get("doi")
                 enriched = None
 
-                # 1. DOI → Semantic Scholar enrichment
-                if doi:
-                    enriched = semantic_scholar_by_doi(doi)
-
-                # 2. PubMed by title
+                if doi: enriched = semantic_scholar_by_doi(doi)
                 if not enriched and title:
                     pm = search_pubmed(title, 1)
                     enriched = pm[0] if pm else None
-
-                # 3. Google fallback
                 if not enriched and title:
                     gg = google_search_fallback(title)
                     enriched = gg[0] if gg else None
 
-                # 4. If still nothing → bare metadata
                 if not enriched:
                     enriched = {
-                        "title": title,
-                        "authors_info": ", ".join(authors) if isinstance(authors, list) else (authors or ""),
-                        "snippet": "",
-                        "url": "",
-                        "pdf_url": "",
-                        "doi": doi,
-                        "year": year,
-                        "venue": None
+                        "title": title, "authors_info": ", ".join(authors) if isinstance(authors, list) else (authors or ""),
+                        "snippet": "", "url": "", "pdf_url": "", "doi": doi, "year": year, "venue": None
                     }
                 collected.append(enriched)
-
+            
             papers_meta = collected
             progress.progress(60)
 
@@ -1002,226 +1014,231 @@ if st.button("🚀 Go"):
         else:  # search_mode == "Lookup by URL / PDF"
             if not url_or_doi or not url_or_doi.strip():
                 st.warning("Please paste a URL or DOI.")
-                st.stop()
+                return 
 
             val = url_or_doi.strip()
-            status.info("🧭 Resolving input…")
+            status.info(f"🧭 Cycle {cycle_num}: Resolving input…")
             progress.progress(10)
 
+            # DOI path...
             if DOI_RE.fullmatch(val):
-                # DOI path: Crossref enrich + S2 by title if possible
                 doi = val
                 enr = crossref_enrich(doi)
                 title = enr.get("title")
-                if title:
-                    status.info("🔎 Searching Semantic Scholar by title…")
-                    ss = search_semantic_scholar(title, limit=1)
-                else:
-                    ss = []
-                base = {
-                    "title": enr.get("title"),
-                    "url": enr.get("url"),
-                    "authors_info": enr.get("authors_info"),
-                    "snippet": "",
-                    "pdf_url": "",
-                    "doi": doi,
-                    "venue": enr.get("venue"),
-                    "year": enr.get("year"),
-                }
+                ss = search_semantic_scholar(title, limit=1) if title else []
+                base = {"title": enr.get("title"), "url": enr.get("url"), "authors_info": enr.get("authors_info"), "snippet": "", "pdf_url": "", "doi": doi, "venue": enr.get("venue"), "year": enr.get("year")}
                 papers_meta = [ss[0] | base] if ss else [base]
-                progress.progress(60)
+            # URL / PDF path...
             else:
-                # Assume URL
                 is_pdf, pdf_text = fetch_url_and_guess_pdf(val)
-                progress.progress(25)
                 if is_pdf:
-                    status.info("📄 PDF detected — extracting metadata…")
                     md = extract_metadata_from_pdf_text(pdf_text)
-                    doi = md.get("doi")
-                    if doi:
-                        enr = crossref_enrich(doi)
-                    else:
-                        enr = {}
+                    doi = md.get("doi"); enr = crossref_enrich(doi) if doi else {}
                     title = md.get("title") or enr.get("title")
-                    status.info("🔎 Searching Semantic Scholar by title…")
                     ss = search_semantic_scholar(title, limit=1) if title else []
-                    base = {
-                        "title": title,
-                        "url": val,
-                        "authors_info": md.get("authors_info") or enr.get("authors_info"),
-                        "snippet": clean_snippet(pdf_text[:1200]),
-                        "pdf_url": val,
-                        "doi": doi,
-                        "venue": enr.get("venue"),
-                        "year": enr.get("year"),
-                    }
+                    base = {"title": title, "url": val, "authors_info": md.get("authors_info") or enr.get("authors_info"), "snippet": clean_snippet(pdf_text[:1200]), "pdf_url": val, "doi": doi, "venue": enr.get("venue"), "year": enr.get("year")}
                     papers_meta = [ss[0] | base] if ss else [base]
-                    progress.progress(70)
                 else:
-                    status.info("🌐 Not a PDF — trying title guess from URL path…")
                     guessed = re.sub(r"[-_/]+", " ", val.split("//")[-1])[:120]
                     ss = search_semantic_scholar(guessed, limit=1)
                     papers_meta = ss
-                    progress.progress(70)
+            
+            progress.progress(70)
 
         # Initialize pyzotero client once for duplicate checks
         zot_client, zot_error = init_pyzotero_local(user_zotero_id)
         if zot_error:
-            # We don't stop execution, but warn the user that duplicate checks won't run
             st.warning(f"Zotero Duplicate Check Warning: {zot_error}")
 
-
-        # If nothing found — friendly message
         if not papers_meta:
-            status.warning("")
-            progress.progress(100)
-            st.error("😅 We searched high, low, and even peered behind the paywall sofa cushions… but found nada.")
-            st.caption("Try tweaking the query or switching modes. Even librarians have off days.")
-            st.stop()
+            st.error(f"😅 Cycle {cycle_num}: Found nada. Skipping annotation.")
+            return
 
-        # Render + Annotate Loop (MODIFIED EXECUTION ORDER)
-        status.info("🧪 Analyzing, annotating, and checking duplicates…")
+        # Render + Annotate Loop
+        status.info(f"🧪 Cycle {cycle_num}: Analyzing {len(papers_meta)} paper(s) & checking Zotero…")
         progress.progress(75)
 
-        # Map Zotero threshold: score3 (0..3)
         zotero_threshold_score3 = min(3, max(0, int(min_score3)))
 
         # --- Sequential Annotation Loop ---
         for i, paper in enumerate(papers_meta):
             title = paper.get("title", "")
-            url = paper.get("url", "")
             authors_info = paper.get("authors_info", "")
             snippet = paper.get("snippet", "")
+            url = paper.get("url", "")
             pdf_url = paper.get("pdf_url", "")
             doi = paper.get("doi")
-            venue = paper.get("venue")
-            year = paper.get("year")
-
-            # --- EARLY CHECK: Zotero Duplicates & Transfer Conditions ---
-            if add_to_zotero:
-                # 1. DUPLICATE CHECK (Time/Resource consuming)
-                if not allow_duplicates:
-                    is_duplicate, dup_msg = check_zotero_duplicate(zot_client, title)
-                    if is_duplicate:
-                        st.info(f"⚠️ Skipped AI/Transfer: {dup_msg}")
-                        # Skip remaining loop steps (AI call and posting)
-                        continue
-                    if "Zotero client not available" in dup_msg:
-                        # Log warning, but don't stop (already logged above, but good practice to check)
-                        pass
+            venue = paper.get("venue"); year = paper.get("year")
             
-            # Pull PDF text when useful (Relatively high cost, done before AI)
+            # Duplicate check
+            if add_to_zotero and not allow_duplicates:
+                is_duplicate, dup_msg = check_zotero_duplicate(zot_client, title)
+                if is_duplicate:
+                    st.info(f"⚠️ Skipped AI/Transfer: {dup_msg}")
+                    continue
+            
+            # AI annotation
             pdf_text = extract_pdf_text(pdf_url or url)
+            user_query_for_ai = user_prompt if search_mode == 'Keyword Search' else (title or paste_text if search_mode == 'Paste citation / page text' else url_or_doi)
+            abstract_ai, tags, score3 = gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_query_for_ai, selected_model_id) if client else ("GEMINI API KEY IS MISSING or invalid. No annotation performed.", [], 0)
 
-            # --- AI ANNOTATION CALL (Highest Cost Operation) ---
-            user_query = (
-                user_prompt if search_mode == 'Keyword Search' else
-                (title or paste_text if search_mode == 'Paste citation / page text' else url_or_doi)
-            )
-
-            # Sequential API call with backoff
-            abstract_ai, tags, score3 = gemini_annotate_paper(
-                title, authors_info, snippet, pdf_text, url, user_query, selected_model_id
-            ) if client else ("GEMINI API KEY IS MISSING or invalid. No annotation performed.", [], 0)
-
-            # Update progress bar
             progress.progress(75 + int((i / len(papers_meta)) * 20))
 
-            # --- UI RENDERING ---
-            with st.expander(f"📄 {title or 'Untitled'} (Score: {score3})", expanded=True):
-                if authors_info:
-                    st.markdown(f"**Authors:** {authors_info}")
-                if venue or year:
-                    st.markdown(f"**Venue / Year:** {venue or '—'} — {year or '—'}")
-
-                # --- Abstract Display ---
-                if snippet:
-                    st.markdown(f"**Abstract (source):** {snippet}")
+            # --- UI RENDERING & ZOTERO POSTING ---
+            with st.expander(f"📄 [Cycle {cycle_num}, {i+1}/{len(papers_meta)}] {title or 'Untitled'} (Score: {score3})", expanded=False):
+                if authors_info: st.markdown(f"**Authors:** {authors_info}")
+                if venue or year: st.markdown(f"**Venue / Year:** {venue or '—'} — {year or '—'}")
+                if snippet: st.markdown(f"**Abstract (source):** {snippet}")
+                
+                # AI Abstract Display and logic
                 if abstract_ai:
-                    if abstract_ai.startswith("RATE LIMIT EXHAUSTED") or abstract_ai.startswith("API CONNECTION_ERROR") or abstract_ai.startswith("Gemini returned") or abstract_ai.startswith("API FAILURE") or abstract_ai.startswith("Unknown API Failure"):
-                        st.error(f"**AI Abstract Failure:** {abstract_ai}")
-                    elif abstract_ai.startswith("GEMINI API KEY IS MISSING"):
+                    if "RATE LIMIT EXHAUSTED" in abstract_ai or "API FAILURE" in abstract_ai or "GEMINI API KEY IS MISSING" in abstract_ai:
                         st.error(f"**AI Abstract Failure:** {abstract_ai}")
                     else:
-                        st.markdown("**Abstract (AI):**")
-                        st.write(abstract_ai)
+                        st.markdown("**Abstract (AI):**"); st.write(abstract_ai)
 
                 if url:
                     st.markdown(f"[🔗 View Paper]({url})")
                     doi_or_url = f"https://doi.org/{doi}" if doi else url
                     inst1 = with_ntu_proxy(doi_or_url, style=1)
                     inst2 = with_ntu_proxy(doi_or_url, style=2)
-                    if inst1:
-                        st.markdown(f"[🏫 NTU Access (style 1)]({inst1})")
-                    if inst2:
-                        st.markdown(f"[🏫 NTU Access (style 2)]({inst2})")
+                    if inst1: st.markdown(f"[🏫 NTU Access (style 1)]({inst1})")
+                    if inst2: st.markdown(f"[🏫 NTU Access (style 2)]({inst2})")
 
-                if tags:
-                    st.markdown("**🏷️ Tags:** " + ", ".join(tags))
+                if tags: st.markdown("**🏷️ Tags:** " + ", ".join(tags))
                 st.markdown(f"**AI Relevance (0–3):** `{score3}`")
 
-                # --- LOCAL ZOTERO POSTING (Now inside the check for efficiency) ---
+                # Zotero Posting
                 if add_to_zotero and (score3 >= zotero_threshold_score3):
-                    
                     doi_or_url = f"https://doi.org/{doi}" if doi else url
                     proxy_url = with_ntu_proxy(doi_or_url, style=1) or with_ntu_proxy(doi_or_url, style=2) or url
-
-                    # 1. ABSTRACT CONTENT LOGIC (Hybrid if AI is 40% longer)
                     abstract_content = ""
                     abstract_ai_content = ""
-                    
-                    # Check if AI content is significantly better (at least 40% longer)
-                    if abstract_ai and not abstract_ai.startswith("RATE LIMIT EXHAUSTED"):
-                        # Only apply the length check if a snippet is present
+                    if abstract_ai and not "RATE LIMIT EXHAUSTED" in abstract_ai:
                         if snippet:
-                            if len(abstract_ai) > (len(snippet) * 1.4):
-                                abstract_ai_content = f"AI EXPANDED SUMMARY:\n{abstract_ai}"
-                            
-                        elif len(abstract_ai) > 10: # Use AI as fallback if no snippet but AI is meaningful
-                             abstract_ai_content = f"AI SUMMARY:\n{abstract_ai}"
-
-                    # Prioritize snippet, append expanded AI content if applicable
+                            if len(abstract_ai) > (len(snippet) * 1.4): abstract_ai_content = f"AI EXPANDED SUMMARY:\n{abstract_ai}"
+                        elif len(abstract_ai) > 10: abstract_ai_content = f"AI SUMMARY:\n{abstract_ai}"
+                    
                     if snippet:
                         abstract_content += f"SOURCE ABSTRACT:\n{snippet}"
-                        if abstract_ai_content:
-                            abstract_content += "\n\n---\n\n" + abstract_ai_content
-                    elif abstract_ai_content:
-                        abstract_content = abstract_ai_content
+                        if abstract_ai_content: abstract_content += "\n\n---\n\n" + abstract_ai_content
+                    elif abstract_ai_content: abstract_content = abstract_ai_content
                     
-                    # APPEND RELEVANCE SCORE AND QUERY TO ABSTRACT CONTENT (NEW REQUIREMENT)
-                    relevance_and_query_line = f"AI Relevance (0–3): {score3} | Search Query: {user_query}"
+                    relevance_and_query_line = f"AI Relevance (0–3): {score3} | Search Query: {user_query_for_ai}"
+                    if abstract_content: abstract_content += "\n\n" + relevance_and_query_line
+                    else: abstract_content = relevance_and_query_line
 
-                    if abstract_content:
-                        abstract_content += "\n\n" + relevance_and_query_line
-                    else:
-                        # If no abstract content was generated at all, just use the metadata line
-                        abstract_content = relevance_and_query_line
-
-
-                    # 2. ITEM POSTING
                     item = {
-                        'itemType': 'journalArticle',
-                        'title': title,
-                        'creators': parse_authors(authors_info),
-                        'abstractNote': abstract_content,
-                        'tags': [{'tag': t} for t in (tags or [])],
-                        'url': proxy_url,
-                        'date': str(year) if year else None,
-                        'DOI': doi,
+                        'itemType': 'journalArticle', 'title': title, 'creators': parse_authors(authors_info),
+                        'abstractNote': abstract_content, 'tags': [{'tag': t} for t in (tags or [])], 
+                        'url': proxy_url, 'date': str(year) if year else None, 'DOI': doi,
                     }
                     item = {k: v for k, v in item.items() if v not in (None, "" or [])}
-
-                    # The save_to_zotero_local call uses the new 10-minute timeout (600 seconds)
                     success, msg = save_to_zotero_local(item)
-                    if success:
-                        st.success(f"✅ Added to Local Zotero (score3={score3})")
-                    else:
-                        st.error(f"❌ Local Zotero Error: {msg}")
+                    if success: st.success(f"✅ Added to Local Zotero (score3={score3})")
+                    else: st.error(f"❌ Local Zotero Error: {msg}")
 
-        status.success("Done ✅")
+        status.success(f"Cycle **{cycle_num}** complete ✅")
         progress.progress(100)
 
-    finally:
-        # Clear status after a short delay to avoid lingering messages
-        sleep(0.4)
-        status.empty()
+    except Exception as e:
+        status.error(f"❌ Cycle {cycle_num} failed due to unhandled exception: {e.__class__.__name__}: {e}")
+        logging.error(f"Cycle {cycle_num} unhandled error: {e}")
+        return
+
+
+# ============================
+# MAIN EXECUTION LOOP
+# ============================
+if st.button("🚀 Go"):
+    
+    # Check for inputs before running
+    if search_mode == "Keyword Search" and not 'user_prompt' in locals() or (search_mode == "Keyword Search" and not locals().get('user_prompt')):
+        st.error("Please enter a research topic to start the cycle.")
+        st.stop()
+    elif search_mode == "Paste citation / page text" and not 'paste_text' in locals() or (search_mode == "Paste citation / page text" and not locals().get('paste_text')):
+        st.error("Please paste citation(s) or text to start the cycle.")
+        st.stop()
+    elif search_mode == "Lookup by URL / PDF " and not 'url_or_doi' in locals() or (search_mode == "Lookup by URL / PDF " and not locals().get('url_or_doi')):
+        st.error("Please paste a URL or DOI to start the cycle.")
+        st.stop()
+    
+    # Capture current state of input variables
+    current_user_prompt = locals().get('user_prompt')
+    current_use_boolean = locals().get('use_boolean')
+    current_search_source = locals().get('search_source')
+    current_paste_text = locals().get('paste_text')
+    current_url_or_doi = locals().get('url_or_doi')
+    
+    progress = st.progress(0)
+    status = st.empty()
+
+    # Main "Cycle of Cycles" Loop
+    for cycle_num in range(1, int(num_cycles) + 1):
+        
+        run_single_cycle(
+            cycle_num, num_cycles,
+            search_mode, max_results, min_score3, selected_model_id,
+            add_to_zotero, allow_duplicates, user_zotero_id,
+            progress, status,
+            user_prompt=current_user_prompt, use_boolean=current_use_boolean,
+            search_source=current_search_source, paste_text=current_paste_text,
+            url_or_doi=current_url_or_doi, user_zotero_collection=user_zotero_collection
+        )
+
+        # 2. Quota Management Pause (only if more cycles are planned)
+        if cycle_num < num_cycles:
+            st.markdown("---")
+            st.subheader(f"Cycle {cycle_num} Complete: **Initiating Quota Pause**")
+            
+            if pause_type == "Timed Delay":
+                if cycle_pause_minutes is None:
+                    st.error("Error: Timed Delay selected, but 'Pause between cycles' is not set.")
+                    break
+                    
+                pause_seconds = cycle_pause_minutes * 60
+                status.info(f"⏳ Long pause: Sleeping for **{cycle_pause_minutes} minutes** (approx. {pause_seconds} seconds) to circumvent API daily allotment quota...")
+                progress.progress(0) # Reset progress bar before the long sleep
+                
+                # Use an inner progress bar for visual feedback during the long wait
+                sleep_placeholder = st.empty()
+                
+                # Loop for progress bar update (e.g., update every 5 seconds)
+                update_interval = 5
+                total_updates = int(pause_seconds / update_interval)
+                
+                for j in range(total_updates + 1):
+                    remaining_seconds = int(pause_seconds - (j * update_interval))
+                    if remaining_seconds < 0: remaining_seconds = 0
+                    
+                    progress_val = int((j / total_updates) * 100)
+                    progress_val = min(100, progress_val)
+                    
+                    sleep_placeholder.progress(progress_val)
+                    
+                    # Convert remaining seconds to HH:MM:SS for better readability if needed, or keep in seconds
+                    hours = remaining_seconds // 3600
+                    minutes = (remaining_seconds % 3600) // 60
+                    seconds = remaining_seconds % 60
+                    time_str = f"{hours:02}:{minutes:02}:{seconds:02}"
+                    
+                    sleep_placeholder.caption(f"Time remaining in pause: **{time_str}**.")
+                    
+                    if remaining_seconds > 0:
+                        sleep(update_interval)
+
+                sleep_placeholder.empty()
+                st.success(f"Pause complete. Resuming for Cycle {cycle_num + 1}/{num_cycles}.")
+                
+            elif pause_type == "Manual Button":
+                st.warning("Manual Pause: Click the button below to resume the next cycle.")
+                if not st.button(f"▶️ Continue to Cycle {cycle_num + 1}/{num_cycles}", key=f"continue_cycle_{cycle_num}"):
+                    # Reruns the script, staying on this page until the button is clicked
+                    st.stop()
+                
+            status.empty() # Clear status before the next run starts
+            st.markdown("---")
+            
+    status.empty()
+    st.success("🎉 All cycles finished!")
+    st.balloons()
