@@ -28,7 +28,7 @@ st.set_page_config(page_title="📚 AI Literature Helper", page_icon="🤖")
 # --- FIXED SECTION START ---
 # keys are now assigned directly as strings
 SEMANTIC_SCHOLAR_API_KEY = ""
-GEMINI_API_KEY = "-vC_4_osmLF6DMY" # Replaced with empty string as agreed. USER MUST REPLACE THIS.
+GEMINI_API_KEY = "" # Replaced with empty string as agreed. USER MUST REPLACE THIS.
 NCBI_EMAIL = "@gmail.com"
 NCBI_API_KEY = ""
 
