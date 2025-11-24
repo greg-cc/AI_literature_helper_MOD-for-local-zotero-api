@@ -27,10 +27,10 @@ st.set_page_config(page_title="📚 AI Literature Helper", page_icon="🤖")
 
 # --- FIXED SECTION START ---
 # keys are now assigned directly as strings
-SEMANTIC_SCHOLAR_API_KEY = "It2pKMHpTK7l5lnOhPUKE4ldBA3Lzeq82hHEsbnB"
-GEMINI_API_KEY = "AIzaSyDKI4TlgP7N8oiPaYK-vC_4_osmLF6DMY" # Replaced with empty string as agreed. USER MUST REPLACE THIS.
-NCBI_EMAIL = "reggcrowmell@gmail.com"
-NCBI_API_KEY = "698aa15950467c8cda8583c04e199237cac08"
+SEMANTIC_SCHOLAR_API_KEY = ""
+GEMINI_API_KEY = "-vC_4_osmLF6DMY" # Replaced with empty string as agreed. USER MUST REPLACE THIS.
+NCBI_EMAIL = "@gmail.com"
+NCBI_API_KEY = ""
 
 # client now uses the variable defined above
 try:
