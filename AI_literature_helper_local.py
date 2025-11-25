@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*- version 1.2
 import streamlit as st
 import requests, json, re, os, io, csv
 import xml.etree.ElementTree as ET
@@ -35,10 +35,10 @@ st.set_page_config(page_title= "📚 AI Literature Helper" , page_icon= "🤖" ,
 
 # --- FIXED SECTION START ---
 # keys are now assigned directly as strings
-SEMANTIC_SCHOLAR_API_KEY = "It2pKMHpTK7l5lnOhPUKE4ldBA3Lzeq82hHEsbnB"
-GEMINI_API_KEY = "AIzaSyALZc8Z-vrmMpsdp2TxnSz_4wKZtuuotE4"
-NCBI_EMAIL = "reggcrowmell@gmail.com"
-NCBI_API_KEY = "89fb3103db9bd0586c75a45d0c6a65618108" # client now uses the variable defined above
+SEMANTIC_SCHOLAR_API_KEY = ""
+GEMINI_API_KEY = ""
+NCBI_EMAIL = "@gmail.com"
+NCBI_API_KEY = "" # client now uses the variable defined above
 
 
 
