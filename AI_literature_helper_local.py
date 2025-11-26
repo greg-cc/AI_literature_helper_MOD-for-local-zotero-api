@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*- version 1.2
+# -*- coding: utf-8 -*- version 1.3
 import streamlit as st
 import requests, json, re, os, io, csv
 import xml.etree.ElementTree as ET
@@ -26,7 +26,7 @@ RATE_LIMIT_STATUS_CODE = 429
 # --- ZOTERO PAYLOAD CONSTANT ---
 ZOTERO_MAX_ABSTRACT_CHARS = 10000 
 MAX_TAG_LENGTH = 250
-DOI_MISSING_ERROR = "⛔ ERROR: The Digital Object Identifier (DOI) is a CRITICAL identifier for academic records. This item CANNOT be saved to Zotero because the DOI field is EMPTY. Please find the DOI and add it manually before attempting to save this paper again. This integrity check protects your library data." 
+DOI_MISSING_ERROR = "⚠️ ERROR: The Digital Object Identifier (DOI) is a CRITICAL identifier for academic records. This item can still be saved to Zotero because it has an abstract and url so just letting you know." 
 
 # ============================
 # CONFIG
@@ -1066,8 +1066,7 @@ with st.sidebar:
 def gemini_abstract_fallback(title: str, authors_info: str, current_snippet: str, model: str) -> str:
     """
     Generates a concise abstract if the external search abstract is missing or too short.
-    (Original logic, without custom retry/backoff)
-                                                                                              
+    (Original logic, now including rate-limit pause logic)
     """
     if client is None:
         return current_snippet
@@ -1088,19 +1087,21 @@ Output ONLY the abstract text, nothing else."""
             contents=prompt,
         )
         return resp.text.strip()
-      
-      
-       
-                                                                                         
-   
-     
-                                                                                              
-    
-  
-                                                                                         
-     
     except Exception as e:
-        logging.error(f"Abstract Fallback Generation Failed: {e}")
+        error_msg = str(e)
+        # Attempt to surgically extract retry time from the error message using regex
+        retry_match = re.search(r"Please retry in\s*([\d\.]+)\s*s\." , error_msg)
+        if retry_match:
+            try:
+                delay_time = float(retry_match.group(1))
+                logging.warning(f"Rate limit hit. Pausing for specified time: {delay_time:.2f} seconds.")
+                sleep(delay_time)
+                # NOTE: The function does not retry the call here, it just pauses and then fails the fallback attempt.
+                # The pause prevents immediate hammering on the next API call attempt outside this function.
+            except ValueError:
+                logging.error("Could not parse retry time from error message.")
+        
+        logging.error(f"Abstract Fallback Generation Failed: {e.__class__.__name__}: {error_msg}")
         return current_snippet # Return original snippet if AI fails
 
 
@@ -1275,7 +1276,7 @@ def search_pubmed_paged(query, limit=10):
     Bulletproof PubMed search
     using ESearch pagination and chunking EFetch requests.
 
-    UPDATED: The logic remains largely the same but ensures the final abstract
+    UPDATED: The logic remains largely same but ensures the final abstract
     retrieval from XML is clean and error handling is robust.
 				
     """
@@ -1358,12 +1359,13 @@ def search_pubmed_paged(query, limit=10):
 																									
                 abst_nodes = art.findall( ".//Abstract/AbstractText" )
 
-                # Check for unstructured abstract (e.g., single block in the Abstract tag)
+                # Fallback 1: Check for unstructured abstract (e.g., single block in the Abstract tag)
                 if not abst_nodes:
                     abs_text = art.findtext( ".//Abstract" ) or ""
                 else:
-                    # Join all AbstractText parts (for structured abstracts)
-                    abs_text = " " .join((n.text or "" ) for n in abst_nodes).strip()
+                    # Primary Extraction: Join all AbstractText parts (for structured abstracts)
+                    # Use list comprehension to handle potential None text nodes more robustly
+                    abs_text = " " .join([n.text for n in abst_nodes if n.text]).strip()
 
                 abstracts[pmid_node] = clean_snippet(abs_text)
             # --- End XML Parsing Snippet ---
@@ -1880,7 +1882,11 @@ def run_search_cycle(search_query: str, search_mode: str, search_source: str, ma
                     doi_value = doi if doi else None
 
                     if not doi_value:
-                        st.warning(DOI_MISSING_ERROR) # Display the doi check.
+                        st.warning(DOI_MISSING_ERROR) # Display the new non-blocking message as a warning
+                        logging.warning(f"DOI is missing for: {title}. Proceeding with Zotero post anyway.")
+                        # The 'continue' statement is intentionally removed to allow saving without DOI.
+
+                    # Duplicate check is disabled in this code version, skipping check.
                     doi_or_url = f"https://doi.org/{doi}" if doi else url
                     proxy_url = with_ntu_proxy(doi_or_url, style= 1 ) or with_ntu_proxy(doi_or_url, style= 2 ) or url
 
