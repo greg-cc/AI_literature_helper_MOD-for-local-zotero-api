@@ -36,10 +36,10 @@ st.set_page_config(page_title="📚 AI Literature Helper", page_icon="🤖", lay
 
 # --- API KEYS ---
 # NOTE: In production, these should be environment variables or user inputs.
-SEMANTIC_SCHOLAR_API_KEY = "It2pKMHpTK7l5lnOhPUKE4ldBA3Lzeq82hHEsbnB"
-GEMINI_API_KEY = "AIzaSyAiRr5Qpx8yvoMIWQhO5hKM0sRcHhaZIsw"
-NCBI_EMAIL = "reggcrowmell@gmail.com"
-NCBI_API_KEY = "89fb3103db9bd0586c75a45d0c6a65618108"
+SEMANTIC_SCHOLAR_API_KEY = ""
+GEMINI_API_KEY = ""
+NCBI_EMAIL = "@gmail.com"
+NCBI_API_KEY = ""
 
 # --- GEMINI CLIENT SETUP ---
 try:
