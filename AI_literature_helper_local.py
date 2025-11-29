@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*- version 1.5
+# -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd  # Required for the Data Editor
 import requests, json, re, os, io, csv
@@ -44,6 +44,7 @@ SEMANTIC_SCHOLAR_API_KEY = ""
 GEMINI_API_KEY = ""
 NCBI_EMAIL = "@gmail.com"
 NCBI_API_KEY = ""
+
 
 # --- GEMINI CLIENT SETUP ---
 try:
@@ -541,6 +542,7 @@ def remove_think_tags(text):
     clean_text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
     return clean_text.strip()
 
+# --- SURGICAL UPDATE: PROMPTING & REPORT FORMAT ---
 def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_query, model, suggested_tags=None, priority_topics=None):
     use_ollama = st.session_state.get("use_ollama", False)
     
@@ -1119,130 +1121,140 @@ def search_by_url_doi_pdf(url_or_doi):
     return []
 
 # ============================
-# DISPLAY & PROCESSING
+# DISPLAY & PROCESSING (SURGICAL UPDATE: Separators, Font, Abstract Cols)
 # ============================
 
 def _display_paper_details(paper_data):
-    """Render a single paper details card."""
+    """Render a single paper details card from dictionary."""
+    # Check if this is a separator object (Logic added for Cycle Labels)
+    if paper_data.get('is_separator'):
+        st.markdown(f"## 🔄 CYCLE START: **{paper_data['query']}**")
+        st.markdown("---")
+        return
+
     paper = paper_data.get('paper', {})
     score = paper_data.get('score', 0)
     tags = paper_data.get('tags', [])
     ai_report_body = paper_data.get('abstract_ai', "")
+    passes = paper_data.get('passes', False)
     
     vector_score = paper.get('vector_score', 0.0)
     process_time = paper_data.get('process_time', 0.0)
     z_thresh = paper_data.get('z_thresh', 0)
     
+    # NEW: explicit reason check (defaults to score too low)
+    skip_reason = paper_data.get('skip_reason', "Score too low") 
+    
     title = paper.get("title") or "Untitled Paper"
     url = paper.get("url", "#")
-    doi = paper.get("doi", "N/A")
-    date_str = paper.get("year") or "N/A"
+    doi = paper.get("doi")
+    date_str = paper.get("year") or "N/A" 
+    
     status_msg = paper_data.get('status_msg', "") 
     
+    # Icon logic
     icon = "✅" if status_msg == "SAVED" else ("🚫" if status_msg == "DUPLICATE" else "⚠️")
     
     with st.expander(f"{icon} {title}", expanded=(status_msg == "SAVED")):
         
-        # STATUS BAR
-        if status_msg == "SAVED":
-            st.success(f"**SAVED** | AI Score: {score}/3 | Vector Sim: {vector_score:.2f}")
-        elif status_msg == "DUPLICATE":
-            st.warning(f"**DUPLICATE** | DOI: {doi}")
+        if url and url != "#":
+            st.markdown(f"# [{title}]({url})") # H1
         else:
-            reason = "Score too low" if score < z_thresh else "Filters failed"
-            st.error(f"**SKIPPED** | Reason: {reason} | AI Score: {score}/3")
+            st.markdown(f"# {title}") # H1
+        
+        # --- BIG COLORFUL STATUS BAR ---
+        if status_msg == "SAVED":
+            bar_text = f"**SAVED** | AI Score: {score}/3 | Vector Sim: {vector_score:.2f} | Time: {process_time:.2f}s | Tags: {len(tags)}"
+            st.success(bar_text)
+        elif status_msg == "DUPLICATE":
+            bar_text = f"**DUPLICATE** | DOI: {doi} | Time: {process_time:.2f}s"
+            st.warning(bar_text)
+        else:
+            # SKIPPED status
+            bar_text = f"**SKIPPED** | Reason: {skip_reason} | Vector Sim: {vector_score:.2f}"
+            st.error(bar_text)
 
-        # 1. CITATION
-        st.markdown("### 1. Citation Data")
-        st.markdown(f"*   **Authors:** {paper.get('authors_info', 'N/A')}")
-        st.markdown(f"*   **DOI:** [{doi}](https://doi.org/{doi})")
-        if url: st.markdown(f"*   **Link:** [Open Source]({url})")
+        # --- METADATA SECTION (H2) ---
+        st.markdown("## 1. Citation Data")
+        st.markdown(f"* **Authors:** {paper.get('authors_info','')}")
+        st.markdown(f"* **Date:** {date_str}")
+        if doi: st.markdown(f"* **DOI:** `{doi}`")
         
-        # 2. ABSTRACTS (Substances now integrated here)
-        st.markdown("### 2. Abstracts")
+        # --- ABSTRACTS (Side by Side) ---
+        st.markdown("## 2. Abstracts")
+        c_left, c_right = st.columns(2)
         
-        col_src, col_ai = st.columns(2)
-        with col_src:
-            st.info(f"**Source Abstract**\n\n{paper.get('snippet', 'No abstract.')}")
-        with col_ai:
+        with c_left:
+            st.info(f"**Source Abstract**\n\n{paper.get('snippet', 'No abstract')}")
+        
+        with c_right:
             if ai_report_body:
                 st.markdown(ai_report_body)
             else:
-                st.caption("AI Analysis not generated.")
-        
-        # 3. CATEGORIZATION (Formerly Section 4)
-        st.markdown("### 3. Categorization")
-        st.markdown(f"*   **Tags:** {', '.join(tags) if tags else 'None detected'}")
+                st.caption("No AI Analysis available.")
 
-        # ACTIONS
-        st.markdown("---")
+        # --- CATEGORIZATION (H2) ---
+        st.markdown("## 3. Categorization")
+        if tags: st.markdown(f"**Tags:** {', '.join(tags)}")
+
         if st.button("📤 Upload to Zotero", key=f"man_save_{hash(title) + int(time())}"):
             item = {
                 "itemType": "journalArticle",
                 "title": paper.get("title"),
                 "creators": parse_authors(paper.get("authors_info")),
-                "abstractNote": (paper.get("snippet") or "")[:ZOTERO_MAX_ABSTRACT_CHARS],
-                "date": str(date_str),
+                "abstractNote": (paper.get("snippet") or ai_report_body)[:ZOTERO_MAX_ABSTRACT_CHARS],
+                "date": str(date_str), 
                 "tags": [{"tag": t[:MAX_TAG_LENGTH]} for t in tags],
                 "url": with_ntu_proxy(doi or paper.get("url")),
                 "DOI": doi
             }
+            # Attempt to use the collection from automated queries if running, or default
             current_coll = st.session_state.user_zotero_collection
             ok, msg = save_to_zotero_local(item, collection_id=current_coll)
-            if ok: st.toast(f"✅ Saved to Zotero: {title}")
-            else: st.error(f"Zotero Error: {msg}")
+            if ok:
+                st.toast(f"✅ Saved to Zotero: {title}")
+                paper_data['status_msg'] = "SAVED" 
+            else:
+                st.error(f"Zotero Error: {msg}")
+
+# SURGICAL UPDATE: Removing filter logic for visibility audit
 def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_ph, prog_ph, query_stats, collection_override=None):
     annotated = 0
     saved = 0
     
-    # Determine which collection to use (Query Specific vs Global Default)
     target_collection = collection_override if collection_override else st.session_state.user_zotero_collection
 
-    # UI Settings
     min_len = st.session_state.abstract_length_slider
     z_thresh = st.session_state.min_score3_slider
-    vec_min = st.session_state.vector_score_min_slider
+    vec_min = st.session_state.vector_score_min_slider # Float value from new slider
     
-    # Filter Config
     req_vals = [v.lower() for v in st.session_state.ai_tag_post_filter_values]
     suggested_tags = st.session_state.selected_tag_categories
     
-    # Speed Up Settings
     enable_speedup = st.session_state.enable_speedup_checkbox
     speedup_threshold = st.session_state.speedup_threshold_slider
     
-    # AI Model Resolution (LOCAL AWARE)
     if st.session_state.get("use_ollama"):
         actual_model_id = st.session_state.get("ollama_local_model_selector", "llama3")
     else:
         selected_key = st.session_state.model_key_selector
         actual_model_id = MODEL_OPTIONS[selected_key]["model_id"]
     
-    # Context (ADDITIVE LOGIC)
     topics_context = st.session_state.get("topics_txt", "")
 
-    # 1. Preranking & Vector Filter
+    # 1. Prerank (BUT DO NOT FILTER LIST SIZE)
     sem_model = get_embedding_model()
     if sem_model:
         chunk = prerank_papers(chunk, query, sem_model)
-        
-        # DEBUG: Only filter if slider > 0.0 to prevent accidental filtering
-        if vec_min > 0.0:
-            original_count = len(chunk)
-            chunk = [p for p in chunk if p.get('vector_score', 0) >= vec_min]
-            dropped = original_count - len(chunk)
-            if dropped > 0:
-                logging.info(f"Vector Filter: Dropped {dropped} papers (Score < {vec_min})")
+        # Note: Previous filtering block was removed here. All papers proceed.
     
-    # If chunk is empty after filter, return early
     if not chunk:
         return 0, 0
 
     for i, paper in enumerate(chunk):
-        start_time = time() # START TIMER
+        start_time = time() 
         idx = papers_processed + i
         
-        # --- CHECK SPEEDUP STATUS ---
         bypass_ai = query_stats.get('bypass_ai', False)
         
         # 2. Duplicate Check
@@ -1251,67 +1263,86 @@ def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_
         if doi and (not st.session_state.allow_duplicates) and check_zotero_duplicate(doi, st.session_state.user_zotero_id, target_collection):
              is_dup = True
 
-        # 3. Abstract Fallback
+        # NEW: Check Vector threshold status (but don't delete paper)
+        vec_score = paper.get('vector_score', 0.0)
+        vector_fail = (sem_model is not None) and (vec_score < vec_min)
+
+        # 3. Abstract Fallback (Skip if vector already failed or is duplicate)
         snip = paper.get("snippet", "")
-        if len(snip) < min_len:
+        if len(snip) < min_len and not vector_fail and not is_dup:
             if not bypass_ai:
                 snip = gemini_abstract_fallback(paper.get("title"), paper.get("authors_info"), snip, actual_model_id)
                 paper["snippet"] = snip
                 paper["snippet_source"] = "AI_FALLBACK"
 
-        # 4. PDF Text (Skip if bypassed)
+        # 4. PDF Text
         pdf_text = ""
-        if not bypass_ai:
+        if not bypass_ai and not vector_fail and not is_dup:
             pdf_text = paper.get("pdf_text") or extract_pdf_text(paper.get("pdf_url") or paper.get("url"))
 
-        # 5. AI Annotation
+        # 5. AI Annotation & Logic
+        ai_abs = ""; tags = []; score = 0
+        skip_reason = "" # Default empty
+
         if is_dup:
-            ai_abs, tags, score = "Duplicate - Skipped Analysis", [], 0
+            status_msg = "DUPLICATE"
+            ai_abs = "Duplicate - Skipped Analysis"
+        elif vector_fail:
+            status_msg = "SKIPPED"
+            skip_reason = f"Vector Score ({vec_score:.2f}) < Min ({vec_min:.2f})"
+            ai_abs = "Skipped analysis due to low relevance."
         elif bypass_ai:
-            ai_abs, tags, score = "Auto-Saved (Speed Mode)", ["Speed-Save"], 3
+            ai_abs = "Auto-Saved (Speed Mode)"
+            tags = ["Speed-Save"]
+            score = 3
+            status_msg = "SAVED"
         else:
-            # ADDITIVE CONTEXT PASSED HERE
+            # AI Call
             ai_abs, tags, score = gemini_annotate_paper(
                 paper.get("title"), paper.get("authors_info"), snip, pdf_text, paper.get("url"), query, actual_model_id,
                 suggested_tags=suggested_tags, priority_topics=topics_context
             )
             if "API FAILURE" not in ai_abs: annotated += 1
 
-        # 6. Semantic Tags (Winner Takes All Logic)
-        if sem_model and "API FAILURE" not in ai_abs and not is_dup:
-            stags = generate_semantic_tags(ai_abs if not bypass_ai else snip, st.session_state.semantic_sentences, sem_model)
-            tags.extend(stags)
+            # Semantic Tags
+            if sem_model:
+                stags = generate_semantic_tags(ai_abs, st.session_state.semantic_sentences, sem_model)
+                tags.extend(stags)
 
-        # 7. Save Logic (Value Filter)
-        passes = True
-        if req_vals:
-            t_lower = {t.lower() for t in tags}
-            passes = any(v in t for t in t_lower for v in req_vals)
+            # Determine Final Status
+            passes = True
+            if req_vals:
+                t_lower = {t.lower() for t in tags}
+                passes = any(v in t for t in t_lower for v in req_vals)
 
-        status_msg = "SKIPPED"
-        if is_dup:
-            status_msg = "DUPLICATE"
-        elif st.session_state.add_to_zotero_state and score >= z_thresh and passes:
+            if st.session_state.add_to_zotero_state and score >= z_thresh and passes:
+                status_msg = "SAVED"
+            else:
+                status_msg = "SKIPPED"
+                if score < z_thresh: skip_reason = f"AI Score {score} < {z_thresh}"
+                elif not passes: skip_reason = "Tag Filters Failed"
+
+        # 6. Save Logic
+        if status_msg == "SAVED":
             item = {
                 "itemType": "journalArticle",
                 "title": paper.get("title"),
                 "creators": parse_authors(paper.get("authors_info")),
                 "abstractNote": (snip or ai_abs)[:ZOTERO_MAX_ABSTRACT_CHARS],
-                "date": str(paper.get("year") or ""), # Send date to Zotero
+                "date": str(paper.get("year") or ""), 
                 "tags": [{"tag": t[:MAX_TAG_LENGTH]} for t in tags],
                 "url": with_ntu_proxy(doi or paper.get("url")),
                 "DOI": doi
             }
-            # PASS THE OVERRIDE COLLECTION ID
             ok, msg = save_to_zotero_local(item, collection_id=target_collection)
             if ok: 
                 saved += 1
-                status_msg = "SAVED"
             else: 
                 st.error(f"Zotero Error: {msg}")
         
         # --- UPDATE QUERY STATS FOR SPEEDUP LOGIC ---
-        if not is_dup and not bypass_ai:
+        # Note: Vector Failed papers do NOT count towards Speedup triggers, only valid saved ones
+        if not is_dup and not vector_fail and not bypass_ai:
             query_stats['processed'] += 1
             if status_msg == "SAVED":
                 query_stats['saved'] += 1
@@ -1332,9 +1363,10 @@ def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_
             'tags': tags,
             'abstract_ai': ai_abs,
             'z_thresh': z_thresh,
-            'passes': passes,
+            'passes': True, # Only used for internal display flag?
             'status_msg': status_msg,
-            'process_time': duration # Added Duration
+            'skip_reason': skip_reason, # Explicit skip reason for UI
+            'process_time': duration
         }
         
         # Append to session state history
@@ -1370,7 +1402,8 @@ if search_mode == "Keyword Search":
     c1, c2, c3 = st.columns(3)
     with c1:
         st.slider("📏 Min Abstract Len", 50, 500, value=prefs.get("min_abstract_length_chars", 150), key="abstract_length_slider")
-        st.slider("✅ Vector Score Min", 0.0, 1.0, value=prefs.get("vector_score_min_value", 0.5), step=0.05, key="vector_score_min_slider")
+        # SURGICAL UPDATE: High Precision Slider
+        st.slider("✅ Vector Score Min", 0.00, 1.00, value=prefs.get("vector_score_min_value", 0.50), step=0.01, format="%.2f", key="vector_score_min_slider")
     with c2:
         st.slider("⭐ Min AI Score", 0, 3, value=prefs.get("min_score3_value", 2), key="min_score3_slider")
     with c3:
@@ -1618,7 +1651,7 @@ with st.sidebar:
         save_current_settings()
 
 # ============================
-# MAIN EXECUTION
+# MAIN EXECUTION (SURGICAL UPDATE: Separator injection)
 # ============================
 
 def run_cycle_logic(queries):
@@ -1652,10 +1685,17 @@ def run_cycle_logic(queries):
         
         status.info(f"Processing: {query_str}")
         
-        # --- FIX 2: Check for empty query inside loop ---
         if not query_str or not query_str.strip():
             st.warning(f"Skipping empty query at index {q_idx}")
             continue
+
+        # --- SURGICAL ADDITION: VISUAL SEPARATOR ---
+        # 1. Print immediately
+        st.markdown(f"## 🔄 STARTING QUERY: **{query_str}**")
+        st.divider()
+        # 2. Append Separator Object to History
+        st.session_state.results_history.append({'is_separator': True, 'query': query_str})
+        # -------------------------------------------
 
         # Initialize stats for this query cycle
         query_stats = st.session_state.cycle_state.get('query_stats', {
@@ -1748,7 +1788,6 @@ def run_cycle_logic(queries):
 st.markdown("---")
 st.subheader("📝 Results Log (Persists across runs)")
 
-                               
 if st.session_state.results_history:
     for item in st.session_state.results_history:
         _display_paper_details(item)
