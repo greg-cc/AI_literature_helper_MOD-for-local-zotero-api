@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*- version 1.5
+# -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd  # Required for the Data Editor
 import requests, json, re, os, io, csv
@@ -56,7 +56,12 @@ except Exception as e:
         GEMINI_CLIENT_INIT_ERROR = f"Client failed to initialize: {e.__class__.__name__}: {e}"
 
 # --- MODEL OPTIONS ---
+# Reordered: Gemini 2.0 Flash Lite is first
 MODEL_OPTIONS = {
+    "models/gemini-2.0-flash-lite-preview-02-05": {
+        "model_id": "gemini-2.0-flash-lite-preview-02-05",
+        "description": "Newest Lite model. Fast and cost-effective."
+    },
     "models/gemini-2.0-flash (Default, 7 GB)": {
         "model_id": "gemini-2.0-flash",
         "description": "Stable version. General purpose, fast. 1M TPM."
@@ -194,7 +199,7 @@ def get_ollama_models():
     return []
 
 def query_ollama_chat(model, prompt, temperature=0.3):
-    """Queries local Ollama chat API."""
+    """Queries local Ollama chat API. Retry loop added to prevent skips."""
     url = f"{OLLAMA_BASE_URL}/chat"
     payload = {
         "model": model,
@@ -202,14 +207,26 @@ def query_ollama_chat(model, prompt, temperature=0.3):
         "stream": False,
         "options": {"temperature": temperature}
     }
-    try:
-        resp = requests.post(url, json=payload, timeout=120) # Long timeout for local inference
-        if resp.status_code == 200:
-            return resp.json().get('message', {}).get('content', '')
-        else:
-            return f"OLLAMA ERROR: {resp.status_code} - {resp.text}"
-    except Exception as e:
-        return f"OLLAMA CONNECTION ERROR: {e}"
+    
+    # Retry loop specifically for Ollama timeouts
+    max_ollama_retries = 3
+    for i in range(max_ollama_retries):
+        try:
+            # TIMEOUT UPDATED TO 900 SECONDS (15 Minutes)
+            resp = requests.post(url, json=payload, timeout=900) 
+            if resp.status_code == 200:
+                return resp.json().get('message', {}).get('content', '')
+            else:
+                # If server error, retry
+                logging.warning(f"Ollama Server Error {resp.status_code}. Retrying...")
+                sleep(2)
+        except requests.exceptions.ReadTimeout:
+            logging.warning(f"Ollama ReadTimeout (Attempt {i+1}/{max_ollama_retries}). Retrying...")
+            sleep(2) # Wait a bit before retrying
+        except Exception as e:
+            return f"OLLAMA CONNECTION ERROR: {e}"
+            
+    return "OLLAMA ERROR: Max retries exceeded (Timeout)."
 
 # --- GEMINI HELPERS ---
 def handle_gemini_backoff(error_msg: str):
@@ -376,7 +393,13 @@ def check_zotero_duplicate(doi: str, library_id: str, collection_id: str) -> boo
     
     url = f"https://api.zotero.org/users/{library_id}/items"
     headers = {"Zotero-API-Key": api_key}
+    # Check globally or in specific collection? Usually global check is safer for "Duplicate"
+    # But if user wants to know if it is in THIS collection, we should add collection to params.
+    # For now, default behavior is checking library-wide to prevent multi-saving.
     params = {"q": doi, "itemType": "journalArticle", "limit": 1}
+    
+    if collection_id:
+        params['collection'] = collection_id
     
     try:
         resp = requests.get(url, headers=headers, params=params, timeout=5)
@@ -386,10 +409,15 @@ def check_zotero_duplicate(doi: str, library_id: str, collection_id: str) -> boo
         pass
     return False
 
-def save_to_zotero_local(item_data: Dict[str, Any]) -> tuple[bool, str]:
+def save_to_zotero_local(item_data: Dict[str, Any], collection_id: str = None) -> tuple[bool, str]:
     """Posts record to local Zotero Connector."""
     connector_url = "http://127.0.0.1:23119/connector/saveItems"
     payload = {"items": [item_data]}
+    
+    # Try to pass collection ID if supported by connector (not standard, but helpful if user has Zotero plugin)
+    if collection_id:
+        payload["collectionId"] = collection_id 
+
     try:
         # TIMEOUT INCREASED TO 5 MINUTES (300 seconds)
         resp = requests.post(connector_url, json=payload, timeout=300)
@@ -503,100 +531,127 @@ def _chunks(seq, n):
     for i in range(0, len(seq), n):
         yield seq[i:i+n]
 
+def remove_think_tags(text):
+    """
+    Removes content within <think>...</think> tags to avoid parsing the reasoning process.
+    Handles multiple think blocks and case sensitivity.
+    """
+    if not text: return ""
+    # Remove <think>...</think> blocks (dotall to capture newlines)
+    clean_text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    return clean_text.strip()
+
 def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_query, model, suggested_tags=None, priority_topics=None):
     use_ollama = st.session_state.get("use_ollama", False)
     
     if not client and not use_ollama:
         return "GEMINI API KEY MISSING", [], 0
     
-    # --- UPDATED PROMPT LOGIC (CLOSED VOCABULARY + TOPIC RELEVANCE) ---
+    # --- PROMPT ---
     tags_instruction = ""
     if suggested_tags and len(suggested_tags) > 0:
-        tags_instruction = f"""
-    OFFICIAL TAG LIST: {', '.join(suggested_tags)}
-    
-    INSTRUCTION: Classify this paper using ONLY tags from the 'OFFICIAL TAG LIST' above.
-    1. Select all tags from the list that accurately describe the paper.
-    2. Do NOT generate novel tags. Do NOT use synonyms.
-    3. If the paper fits none of the tags, output 'Uncategorized'.
-    """
+        tags_instruction = f"OFFICIAL TAG LIST: {', '.join(suggested_tags)}\nSelect relevant tags from this list."
     else:
-        tags_instruction = "INSTRUCTION: Generate 3-5 relevant tags based on the content."
+        tags_instruction = "Generate 3-5 relevant tags."
 
-    # --- TOPICS INSTRUCTION FOR GRADING (ADDITIVE) ---
-    topics_instruction = ""
-    if priority_topics:
-        topics_instruction = f"""
-    PRIORITY INTERESTS: {priority_topics}
-    INSTRUCTION: Evaluate the paper's relevance against the 'User Query' AND these 'PRIORITY INTERESTS'.
-    Papers that align closely with the Priority Interests should receive higher relevance scores.
-    """
+    context_text = pdf_text[:40000] if pdf_text else 'N/A'
 
-    # INCREASED CONTEXT LIMIT TO 40000 CHARS FOR PDF TEXT (approx 24 pages)
     prompt = f"""
-    Analyze this paper.
+    Analyze this scientific paper for a structured report.
+    
+    METADATA:
     Title: {title}
-    Authors: {authors_info}
     Abstract: {snippet}
-    PDF Extract: {pdf_text[:40000] if pdf_text else 'N/A'}
+    Full Text Segment: {context_text}
     User Query: {user_query}
+    Priority Interests: {priority_topics}
 
-    {topics_instruction}
-    {tags_instruction}
+    INSTRUCTIONS:
+    1. ANALYZE RELEVANCE (0-3).
+    2. EXTRACT TAGS (Comma separated).
+    3. SUMMARIZE findings (Bullet points).
+    4. EXTRACT SUBSTANCES (Chemicals and Plants distinct).
 
-    Output format:
-    Abstract: [Summary]
-    Tags: [tag1, tag2]
-    Score: [0-3]
+    OUTPUT FORMAT (STRICTLY USE THESE HEADERS):
+    ###SCORE###
+    <0, 1, 2, or 3>
+    ###TAGS###
+    <tag1, tag2, tag3>
+    ###SUMMARY###
+    <Bullet points of key findings>
+    ###CHEMICALS###
+    <List of pure chemicals, or "None">
+    ###PLANTS###
+    <List of whole plants/herbs, or "None">
     """
     
-    # --- OLLAMA PATH ---
-    if use_ollama:
-        try:
-            text = query_ollama_chat(model, prompt)
-            if "OLLAMA" in text: # Error caught
-                 return text, [], 0
-                 
-            # Parse
-            abs_match = re.search(r"Abstract:\s*(.*?)Tags:", text, re.DOTALL)
-            tags_match = re.search(r"Tags:\s*\[(.*?)\]", text)
-            score_match = re.search(r"Score:\s*(\d)", text)
-            
-            abstract = abs_match.group(1).strip() if abs_match else text[:500]
-            tags = [t.strip() for t in tags_match.group(1).split(',')] if tags_match else []
-            score = int(score_match.group(1)) if score_match else 0
-            
-            return abstract, tags, score
-        except Exception as e:
-            return f"OLLAMA FAIL: {e}", [], 0
+    raw_text = ""
+    
+    # --- API CALL ---
+    try:
+        if use_ollama:
+            raw_text = query_ollama_chat(model, prompt)
+            if "OLLAMA" in raw_text: return raw_text, [], 0
+        else:
+            for attempt in range(3):
+                try:
+                    sleep(GEMINI_DELAY)
+                    resp = client.models.generate_content(model=model, contents=prompt)
+                    raw_text = resp.text
+                    break
+                except Exception as e:
+                    if attempt < 2 and handle_gemini_backoff(str(e)): continue
+                    return f"API FAILURE: {e}", [], 0
+    except Exception as e:
+        return f"EXECUTION ERROR: {e}", [], 0
 
-    # --- GEMINI PATH (RETRY LOOP) ---
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            sleep(GEMINI_DELAY) # Rate limit
-            resp = client.models.generate_content(model=model, contents=prompt)
-            text = resp.text
-            
-            abs_match = re.search(r"Abstract:\s*(.*?)Tags:", text, re.DOTALL)
-            tags_match = re.search(r"Tags:\s*\[(.*?)\]", text)
-            score_match = re.search(r"Score:\s*(\d)", text)
-            
-            abstract = abs_match.group(1).strip() if abs_match else text[:500]
-            tags = [t.strip() for t in tags_match.group(1).split(',')] if tags_match else []
-            score = int(score_match.group(1)) if score_match else 0
-            
-            return abstract, tags, score
-            
-        except Exception as e:
-            # Check for backoff condition
-            if attempt < max_retries - 1 and handle_gemini_backoff(str(e)):
-                # handle_gemini_backoff already sleeps, so we just continue the loop to retry
-                logging.info(f"Retrying Gemini Annotation (Attempt {attempt+2}/{max_retries})...")
-                continue
-            
-            # If we are here, it's either not a 429 or we ran out of retries
-            return f"API FAILURE: {e}", [], 0
+    # --- PARSING ---
+    text = remove_think_tags(raw_text)
+
+    # Improved Regex using the ### headers
+    score_match = re.search(r"###SCORE###\s*(\d+)", text, re.IGNORECASE)
+    tags_match = re.search(r"###TAGS###\s*(.*?)(?=\n###|$)", text, re.DOTALL | re.IGNORECASE)
+    summary_match = re.search(r"###SUMMARY###\s*(.*?)(?=\n###|$)", text, re.DOTALL | re.IGNORECASE)
+    chems_match = re.search(r"###CHEMICALS###\s*(.*?)(?=\n###|$)", text, re.DOTALL | re.IGNORECASE)
+    plants_match = re.search(r"###PLANTS###\s*(.*?)(?=\n###|$)", text, re.DOTALL | re.IGNORECASE)
+
+    score = 0
+    try:
+        if score_match: 
+            score = int(score_match.group(1))
+            if score > 3: score = 3
+    except: pass
+
+    tags = []
+    if tags_match:
+        # Clean newlines and split
+        raw_tags = tags_match.group(1).strip()
+        tags = [t.strip() for t in raw_tags.split(',') if t.strip()]
+
+    summary_txt = summary_match.group(1).strip() if summary_match else "Analysis unavailable."
+    chemicals = chems_match.group(1).strip() if chems_match else "None listed"
+    plants = plants_match.group(1).strip() if plants_match else "None listed"
+
+    # --- BUILD CLEAN REPORT (Substances Integrated into Section 2) ---
+    substances_display = ""
+    # Only show if not "None"
+    has_chem = len(chemicals) > 0 and "none" not in chemicals.lower()
+    has_plant = len(plants) > 0 and "none" not in plants.lower()
+    
+    if has_chem or has_plant:
+        substances_display = f"""
+---
+**🧪 Substances & Plants**
+*   **Chemicals:** {chemicals}
+*   **Plants:** {plants}
+"""
+
+    clean_report = f"""
+**AI Abstract Summary**
+{summary_txt}
+{substances_display}
+"""
+    return clean_report, tags, score
 
 def gemini_abstract_fallback(title, authors_info, current_snippet, model):
     use_ollama = st.session_state.get("use_ollama", False)
@@ -666,15 +721,12 @@ PREFS_FILE = "prefs.json"
 def load_prefs():
     default_prefs = {
         "topics": [
-            "Plant-Derived Chemicals", 
-            "herbal extracts", 
-            "phytochemicals", 
-            "Plant Bioactive Compound", 
-            "Phytonutrient", 
-            "Dietary Phytochemicals", 
-            "Biologically Active Compounds, Plant", 
-            "PLANT ALKALOIDS", 
-            "TCM"
+            "Carotenoids", "Plant-Derived", "herbal", "extracts", "phytochemicals",
+            "Bioactive", "Phytonutrient", "Biologically Active", "Compounds", "ALKALOIDS",
+            "TCM", "polyphenols", "plant extracts", "dose-dependent", "receptors",
+            "synergistic", "phenolic acids", "coumarins", "stilbenes", "Terpenoids",
+            "Terpenes", "Glucosinolates", "Organosulfur", "Phytosterols", "Saponins",
+            "flavonoids"
         ],
         "authors": [],
         "collection_id": "",
@@ -695,7 +747,8 @@ def load_prefs():
         "zotero_api_key_value": "",
         "ai_tag_post_filter_values": [],
         "enable_speedup_value": True, # Enabled by default
-        "speedup_threshold_value": 9  # 9/10 default
+        "speedup_threshold_value": 9,  # 9/10 default
+        "selected_ollama_model": "" # New pref
     }
     if not os.path.exists(PREFS_FILE):
         return default_prefs
@@ -706,20 +759,29 @@ def load_prefs():
             if k not in data:
                 data[k] = v
         
-        # MIGRATION: Fix legacy sentences structure (from size 3 to 4)
+        # MIGRATION: Fix legacy sentences structure
         sents = []
         raw_sents = data.get("semantic_sentences", [])
         for s in raw_sents:
             if len(s) == 3: 
-                # Create a default tag from the first few words of the sentence
                 slug = s[0].split()[0] + "-" + s[0].split()[1] if len(s[0].split()) > 1 else "Tag"
                 sents.append((s[0], s[1], s[2], slug))
             elif len(s) == 4:
                 sents.append(s)
             else:
                 continue
-                
         data["semantic_sentences"] = sents or DEFAULT_SEMANTIC_SENTENCES
+        
+        # MIGRATION: Convert Queries String List -> Dict List (for Per-Query Folders)
+        raw_queries = data.get("automated_queries", [])
+        normalized_queries = []
+        for q in raw_queries:
+            if isinstance(q, str):
+                normalized_queries.append({"query": q, "folder": ""})
+            elif isinstance(q, dict):
+                normalized_queries.append(q)
+        data["automated_queries"] = normalized_queries
+        
         return data
     except Exception:
         return default_prefs
@@ -752,6 +814,9 @@ if "ai_tag_post_filter_values" not in st.session_state:
 
 
 def save_current_settings():
+    # Get current Ollama selection if available
+    ollama_sel = st.session_state.get("ollama_local_model_selector", "")
+    
     new_prefs = {
         "topics": [t.strip() for t in st.session_state.topics_txt.split(",") if t.strip()],
         "authors": [a.strip() for a in st.session_state.authors_txt.split(",") if a.strip()],
@@ -765,6 +830,7 @@ def save_current_settings():
         "max_results_value": st.session_state.max_results_slider,
         "min_score3_value": st.session_state.min_score3_slider,
         "selected_model_key": st.session_state.model_key_selector,
+        "selected_ollama_model": ollama_sel, # Save Ollama choice
         "search_mode_value": st.session_state.search_mode_selector,
         "search_source_value": st.session_state.search_source_selector,
         "vector_score_min_value": st.session_state.vector_score_min_slider,
@@ -826,7 +892,8 @@ def delete_category(idx):
 def add_new_query():
     q = st.session_state.new_query_input.strip()
     if q:
-        st.session_state.automated_queries.append(q)
+        # Default empty folder
+        st.session_state.automated_queries.append({"query": q, "folder": ""})
         st.session_state.new_query_input = ""
         save_current_settings()
 
@@ -835,15 +902,13 @@ def add_new_query():
 # ============================
 
 def search_semantic_scholar(query: str, limit: int, start_offset: int = 0) -> Iterator[List[Dict[str, Any]]]:
-    # --- FIX 1: Safety check for empty queries ---
     if not query or not query.strip():
-        # Log this internally but don't show user error unless debugging
         logging.warning("Skipping Semantic Scholar search: Query is empty.")
-        return # Yields nothing, safe exit
+        return 
     
     url = "https://api.semanticscholar.org/graph/v1/paper/search"
     headers = {"x-api-key": SEMANTIC_SCHOLAR_API_KEY} if SEMANTIC_SCHOLAR_API_KEY else {}
-    offset = start_offset # Start from RESUME point
+    offset = start_offset 
     seen_dois = set()
     
     st.info(f"🔎 Starting Search for: '{query}'")
@@ -880,8 +945,13 @@ def search_semantic_scholar(query: str, limit: int, start_offset: int = 0) -> It
                 if doi in seen_dois and doi is not None: continue
                 if doi: seen_dois.add(doi)
                 
+                # Title Fix: Ensure it is never None
+                paper_title = paper.get("title")
+                if not paper_title:
+                    paper_title = "Untitled Paper"
+
                 page_recs.append({
-                    "title": paper.get("title", ""),
+                    "title": paper_title,
                     "url": paper.get("url", "") or (f"https://doi.org/{doi}" if doi else ""),
                     "authors_info": ", ".join([a.get("name","") for a in paper.get("authors",[])]),
                     "snippet": clean_snippet(paper.get("abstract","")),
@@ -912,7 +982,7 @@ def search_semantic_scholar_by_doi(doi: str):
         p = _request_json_with_retries(url, params=params, headers=headers)
         if not p: return None
         return {
-            "title": p.get("title", ""),
+            "title": p.get("title") or "Untitled Paper",
             "url": p.get("url", "") or f"https://doi.org/{doi}",
             "authors_info": ", ".join([a.get("name","") for a in p.get("authors",[])]),
             "snippet": clean_snippet(p.get("abstract", "")),
@@ -927,24 +997,24 @@ def search_semantic_scholar_by_doi(doi: str):
 def search_pubmed_paged(query, limit=10):
     """
     Unchained PubMed search - No artificial delays.
-    Includes simple caching.
+    Includes simple caching and batching for stability.
     """
-    # Cache key for the whole pubmed search
     cache_key = f"PUBMED_{query}_{limit}"
     if cache_key in st.session_state.search_cache:
         return st.session_state.search_cache[cache_key]
 
     base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
-    term = (query or "")[:300]
+    term = (query or "").strip() 
     
-    # 1. ESearch
+    # 1. ESearch (Get all IDs first)
     all_pmids = []
     retstart = 0
     while len(all_pmids) < limit:
         retmax = min(1000, limit - len(all_pmids))
         params = {"db": "pubmed", "term": term, "retmode": "json", "retmax": retmax, "retstart": retstart, "email": NCBI_EMAIL, "api_key": NCBI_API_KEY}
         try:
-            r = requests.get(f"{base}/esearch.fcgi", params=params, timeout=30).json()
+            # POST is safer for very long queries
+            r = requests.post(f"{base}/esearch.fcgi", data=params, timeout=30).json()
             ids = r.get("esearchresult", {}).get("idlist", [])
             if not ids: break
             all_pmids.extend(ids)
@@ -955,19 +1025,29 @@ def search_pubmed_paged(query, limit=10):
     ids = all_pmids[:limit]
     if not ids: return []
 
-    # 2. ESummary
-    sum_params = {"db": "pubmed", "id": ",".join(ids), "retmode": "json", "email": NCBI_EMAIL, "api_key": NCBI_API_KEY}
-    try:
-        sm = requests.get(f"{base}/esummary.fcgi", params=sum_params, timeout=30).json()
-    except:
-        return []
+    # 2. ESummary (Batch processing to avoid URI too long or timeouts)
+    # We fetch summaries in chunks of 200 (safe limit)
+    all_summaries = {}
+    for chunk in _chunks(ids, 200):
+        sum_params = {"db": "pubmed", "id": ",".join(chunk), "retmode": "json", "email": NCBI_EMAIL, "api_key": NCBI_API_KEY}
+        try:
+            # POST is required here because the ID list can be long
+            resp = requests.post(f"{base}/esummary.fcgi", data=sum_params, timeout=30)
+            if resp.status_code == 200:
+                data = resp.json()
+                result_block = data.get("result", {})
+                # Remove 'uids' list from result block to iterate papers
+                if "uids" in result_block: del result_block["uids"]
+                all_summaries.update(result_block)
+        except:
+            pass
 
-    # 3. EFetch (XML for abstracts)
+    # 3. EFetch (XML for abstracts) - Also batched
     abstracts = {}
-    for chunk in _chunks(ids, 99):
+    for chunk in _chunks(ids, 200):
         try:
             ef_params = {"db": "pubmed", "retmode": "xml", "email": NCBI_EMAIL, "api_key": NCBI_API_KEY}
-            ef = requests.post(f"{base}/efetch.fcgi", params=ef_params, data={"id": ",".join(chunk)}, timeout=40)
+            ef = requests.post(f"{base}/efetch.fcgi", data={"id": ",".join(chunk)}, params=ef_params, timeout=60)
             root = ET.fromstring(ef.text)
             for art in root.findall(".//PubmedArticle"):
                 pmid = art.findtext(".//PMID")
@@ -982,15 +1062,14 @@ def search_pubmed_paged(query, limit=10):
             
     # 4. Consolidate
     out = []
-    block = sm.get("result", {}) or {}
     for pmid in ids:
-        r = block.get(pmid, {}) or {}
+        r = all_summaries.get(pmid, {})
         doi = None
         for aid in r.get("articleids", []):
             if aid.get("idtype") == "doi": doi = aid.get("value"); break
             
         out.append({
-            "title": r.get("title", ""),
+            "title": r.get("title") or "Untitled Paper",
             "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
             "authors_info": ", ".join([a.get("name","") for a in r.get("authors", [])]),
             "snippet": abstracts.get(pmid, ""),
@@ -999,20 +1078,16 @@ def search_pubmed_paged(query, limit=10):
             "year": int(r.get("pubdate", "0")[:4]) if r.get("pubdate") else None
         })
     
-    # Save to cache
     st.session_state.search_cache[cache_key] = out
     return out
 
 def search_by_url_doi_pdf(url_or_doi):
     if not url_or_doi: return []
-    
-    # 1. DOI Check
     m = DOI_RE.search(url_or_doi)
     if m:
         p = search_semantic_scholar_by_doi(m.group(0))
         if p: return [p]
 
-    # 2. URL/PDF Check
     if url_or_doi.startswith("http"):
         is_pdf, text = False, ""
         if url_or_doi.endswith(".pdf"):
@@ -1041,7 +1116,6 @@ def search_by_url_doi_pdf(url_or_doi):
                 "pdf_text": text,
                 "snippet_source": "PDF_EXTRACT"
             }]
-            
     return []
 
 # ============================
@@ -1049,56 +1123,81 @@ def search_by_url_doi_pdf(url_or_doi):
 # ============================
 
 def _display_paper_details(paper_data):
-    """Render a single paper details card from dictionary."""
+    """Render a single paper details card."""
     paper = paper_data.get('paper', {})
     score = paper_data.get('score', 0)
     tags = paper_data.get('tags', [])
-    abstract_ai = paper_data.get('abstract_ai', "")
-    passes = paper_data.get('passes', False)
+    ai_report_body = paper_data.get('abstract_ai', "")
     
-    # Retrieve details
     vector_score = paper.get('vector_score', 0.0)
     process_time = paper_data.get('process_time', 0.0)
-    
-    # Optional logic variables (used for status text)
     z_thresh = paper_data.get('z_thresh', 0)
     
-    title = paper.get("title", "Untitled")
-    doi = paper.get("doi")
-    
+    title = paper.get("title") or "Untitled Paper"
+    url = paper.get("url", "#")
+    doi = paper.get("doi", "N/A")
+    date_str = paper.get("year") or "N/A"
     status_msg = paper_data.get('status_msg', "") 
     
-    # Icon logic
-    icon = "✅ SAVED" if status_msg == "SAVED" else ("🚫 DUPLICATE" if status_msg == "DUPLICATE" else "🚫 SKIPPED")
+    icon = "✅" if status_msg == "SAVED" else ("🚫" if status_msg == "DUPLICATE" else "⚠️")
     
-    with st.expander(f"[{icon}] {title}", expanded=True):
+    with st.expander(f"{icon} {title}", expanded=(status_msg == "SAVED")):
         
-        # --- BIG COLORFUL STATUS BAR ---
-        status_color = "green" if status_msg == "SAVED" else ("orange" if status_msg == "DUPLICATE" else "red")
-        
-        # Construct status text
+        # STATUS BAR
         if status_msg == "SAVED":
-            bar_text = f"**SAVED** | AI Score: {score}/3 | Vector Sim: {vector_score:.2f} | Time: {process_time:.2f}s | Tags: {len(tags)}"
-            st.success(bar_text)
+            st.success(f"**SAVED** | AI Score: {score}/3 | Vector Sim: {vector_score:.2f}")
         elif status_msg == "DUPLICATE":
-            bar_text = f"**DUPLICATE** | DOI: {doi} | Time: {process_time:.2f}s"
-            st.warning(bar_text)
+            st.warning(f"**DUPLICATE** | DOI: {doi}")
         else:
             reason = "Score too low" if score < z_thresh else "Filters failed"
-            bar_text = f"**SKIPPED** | Reason: {reason} | AI Score: {score}/3 | Vector Sim: {vector_score:.2f}"
-            st.error(bar_text)
-        # -------------------------------
+            st.error(f"**SKIPPED** | Reason: {reason} | AI Score: {score}/3")
 
-        st.markdown(f"**Authors:** {paper.get('authors_info','')}")
-        if doi: st.markdown(f"**DOI:** `{doi}`")
-        if paper.get("snippet"): st.markdown(f"**Source Abstract:** {paper['snippet']}")
-        if abstract_ai: st.markdown(f"**AI Analysis:**\n{abstract_ai}")
-        if tags: st.markdown(f"**Tags:** {', '.join(tags)}")
+        # 1. CITATION
+        st.markdown("### 1. Citation Data")
+        st.markdown(f"*   **Authors:** {paper.get('authors_info', 'N/A')}")
+        st.markdown(f"*   **DOI:** [{doi}](https://doi.org/{doi})")
+        if url: st.markdown(f"*   **Link:** [Open Source]({url})")
+        
+        # 2. ABSTRACTS (Substances now integrated here)
+        st.markdown("### 2. Abstracts")
+        
+        col_src, col_ai = st.columns(2)
+        with col_src:
+            st.info(f"**Source Abstract**\n\n{paper.get('snippet', 'No abstract.')}")
+        with col_ai:
+            if ai_report_body:
+                st.markdown(ai_report_body)
+            else:
+                st.caption("AI Analysis not generated.")
+        
+        # 3. CATEGORIZATION (Formerly Section 4)
+        st.markdown("### 3. Categorization")
+        st.markdown(f"*   **Tags:** {', '.join(tags) if tags else 'None detected'}")
 
-def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_ph, prog_ph, query_stats):
+        # ACTIONS
+        st.markdown("---")
+        if st.button("📤 Upload to Zotero", key=f"man_save_{hash(title) + int(time())}"):
+            item = {
+                "itemType": "journalArticle",
+                "title": paper.get("title"),
+                "creators": parse_authors(paper.get("authors_info")),
+                "abstractNote": (paper.get("snippet") or "")[:ZOTERO_MAX_ABSTRACT_CHARS],
+                "date": str(date_str),
+                "tags": [{"tag": t[:MAX_TAG_LENGTH]} for t in tags],
+                "url": with_ntu_proxy(doi or paper.get("url")),
+                "DOI": doi
+            }
+            current_coll = st.session_state.user_zotero_collection
+            ok, msg = save_to_zotero_local(item, collection_id=current_coll)
+            if ok: st.toast(f"✅ Saved to Zotero: {title}")
+            else: st.error(f"Zotero Error: {msg}")
+def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_ph, prog_ph, query_stats, collection_override=None):
     annotated = 0
     saved = 0
     
+    # Determine which collection to use (Query Specific vs Global Default)
+    target_collection = collection_override if collection_override else st.session_state.user_zotero_collection
+
     # UI Settings
     min_len = st.session_state.abstract_length_slider
     z_thresh = st.session_state.min_score3_slider
@@ -1149,14 +1248,12 @@ def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_
         # 2. Duplicate Check
         doi = paper.get("doi")
         is_dup = False
-        if doi and (not st.session_state.allow_duplicates) and check_zotero_duplicate(doi, st.session_state.user_zotero_id, st.session_state.user_zotero_collection):
+        if doi and (not st.session_state.allow_duplicates) and check_zotero_duplicate(doi, st.session_state.user_zotero_id, target_collection):
              is_dup = True
 
         # 3. Abstract Fallback
         snip = paper.get("snippet", "")
         if len(snip) < min_len:
-            # If skipping AI, we also skip abstract fallback? Assuming yes to save time.
-            # But snippet is needed for zotero.
             if not bypass_ai:
                 snip = gemini_abstract_fallback(paper.get("title"), paper.get("authors_info"), snip, actual_model_id)
                 paper["snippet"] = snip
@@ -1200,11 +1297,13 @@ def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_
                 "title": paper.get("title"),
                 "creators": parse_authors(paper.get("authors_info")),
                 "abstractNote": (snip or ai_abs)[:ZOTERO_MAX_ABSTRACT_CHARS],
+                "date": str(paper.get("year") or ""), # Send date to Zotero
                 "tags": [{"tag": t[:MAX_TAG_LENGTH]} for t in tags],
                 "url": with_ntu_proxy(doi or paper.get("url")),
                 "DOI": doi
             }
-            ok, msg = save_to_zotero_local(item)
+            # PASS THE OVERRIDE COLLECTION ID
+            ok, msg = save_to_zotero_local(item, collection_id=target_collection)
             if ok: 
                 saved += 1
                 status_msg = "SAVED"
@@ -1300,26 +1399,36 @@ if search_mode == "Keyword Search":
     else:
         # Show selected queries if any exist
         if st.session_state.automated_queries:
-            # REMOVED DEFAULT=... TO FIX "HELL BREAKING LOOSE" BUG
-            st.multiselect("⬇️ Select Queries", st.session_state.automated_queries, key="cycle_queries_selector")
+            # Extract ONLY the query text for the display list
+            query_display_list = [item['query'] for item in st.session_state.automated_queries]
+            st.multiselect("⬇️ Select Queries", query_display_list, key="cycle_queries_selector_str")
         
         # --- MANAGE QUERIES BOX (WITH DATA EDITOR TABLE) ---
         with st.expander("➕ Manage Queries (Table View)", expanded=True):
-            # 1. Prepare Data
-            # Convert list of strings to DF with a 'Select' column
+            # 1. Prepare Data for Editor (List of Dicts -> DF)
             current_queries = st.session_state.automated_queries
-            df = pd.DataFrame(
-                {
-                    "Select": [False] * len(current_queries),
-                    "Queries": current_queries
-                }
-            )
+            
+            # Create DF. 
+            df = pd.DataFrame(current_queries)
+            
+            # Fix: Ensure columns exist and are strictly String type (prevents float/NaN errors)
+            if 'query' not in df.columns: 
+                df['query'] = pd.Series(dtype='object')
+            if 'folder' not in df.columns: 
+                df['folder'] = pd.Series(dtype='object')
+                
+            # Fill NaNs and cast to string
+            df['query'] = df['query'].fillna("").astype(str)
+            df['folder'] = df['folder'].fillna("").astype(str)
+            
+            # Add Select Column at start
+            df.insert(0, "Select", False)
 
             # 2. Render Editor
             edited_df = st.data_editor(
                 df,
                 num_rows="dynamic",
-                use_container_width=True,
+                use_container_width=True, 
                 key="query_table",
                 column_config={
                     "Select": st.column_config.CheckboxColumn(
@@ -1328,10 +1437,15 @@ if search_mode == "Keyword Search":
                         default=False,
                         width="small"
                     ),
-                    "Queries": st.column_config.TextColumn(
-                        "Search Queries",
+                    "query": st.column_config.TextColumn(
+                        "Search Query",
                         required=True,
                         width="large"
+                    ),
+                    "folder": st.column_config.TextColumn(
+                        "Target Collection ID",
+                        help="Optional: Zotero Collection Key (e.g. A1B2C3D4)",
+                        width="medium"
                     )
                 },
                 hide_index=True
@@ -1347,50 +1461,36 @@ if search_mode == "Keyword Search":
             
             # Logic
             if delete_all_btn:
-                # Clear everything
                 st.session_state.automated_queries = []
-                # Silent Save
-                new_prefs = {
-                    "topics": [t.strip() for t in st.session_state.topics_txt.split(",") if t.strip()],
-                    "authors": [a.strip() for a in st.session_state.authors_txt.split(",") if a.strip()],
-                    "collection_id": st.session_state.user_zotero_collection,
-                    "library_id": st.session_state.user_zotero_id,
-                    "allow_duplicates": st.session_state.allow_duplicates,
-                    "semantic_sentences": st.session_state.semantic_sentences,
-                    "min_abstract_length_chars": st.session_state.abstract_length_slider,
-                    "ai_tag_categories_list": st.session_state.ai_tag_categories_list,
-                    "automated_queries": [], # CLEARED
-                    "max_results_value": st.session_state.max_results_slider,
-                    "min_score3_value": st.session_state.min_score3_slider,
-                    "selected_model_key": st.session_state.model_key_selector,
-                    "search_mode_value": st.session_state.search_mode_selector,
-                    "search_source_value": st.session_state.search_source_selector,
-                    "vector_score_min_value": st.session_state.vector_score_min_slider,
-                    "query_mode_value": st.session_state.query_mode_selector,
-                    "add_to_zotero_state_value": st.session_state.add_to_zotero_state,
-                    "zotero_api_key_value": st.session_state.zotero_api_key,
-                    "ai_tag_post_filter_values": st.session_state.ai_tag_post_filter_values,
-                    "enable_speedup_value": st.session_state.enable_speedup_checkbox,
-                    "speedup_threshold_value": st.session_state.speedup_threshold_slider
-                }
-                save_prefs_silent(new_prefs)
-                st.rerun()
-
+                # Trigger silent save & rerun... (using logic below to avoid duplicate code blocks)
+                save_trigger = True
+            
             elif delete_btn:
                 # Filter out selected rows
-                # Normalize 'Select' to bool (handle NaNs from new rows)
                 edited_df["Select"] = edited_df["Select"].fillna(False).astype(bool)
-                
-                # Keep rows where Select is False
                 kept_df = edited_df[~edited_df["Select"]]
                 
-                # Extract queries
-                new_list = kept_df["Queries"].astype(str).tolist()
-                new_list = [q.strip() for q in new_list if q.strip()]
+                # Convert back to list of dicts
+                new_list = kept_df[['query', 'folder']].to_dict('records')
+                # Clean (remove empty queries)
+                new_list = [q for q in new_list if q['query'].strip()]
                 
-                # Update State
                 st.session_state.automated_queries = new_list
+                save_trigger = True
+            
+            else:
+                # Sync Edits
+                # Extract visible
+                new_list = edited_df[['query', 'folder']].to_dict('records')
+                new_list = [q for q in new_list if q['query'].strip()]
                 
+                if new_list != st.session_state.automated_queries:
+                    st.session_state.automated_queries = new_list
+                    save_trigger = True
+                else:
+                    save_trigger = False
+
+            if save_trigger:
                 new_prefs = {
                     "topics": [t.strip() for t in st.session_state.topics_txt.split(",") if t.strip()],
                     "authors": [a.strip() for a in st.session_state.authors_txt.split(",") if a.strip()],
@@ -1400,7 +1500,7 @@ if search_mode == "Keyword Search":
                     "semantic_sentences": st.session_state.semantic_sentences,
                     "min_abstract_length_chars": st.session_state.abstract_length_slider,
                     "ai_tag_categories_list": st.session_state.ai_tag_categories_list,
-                    "automated_queries": st.session_state.automated_queries, # UPDATED LIST
+                    "automated_queries": st.session_state.automated_queries, 
                     "max_results_value": st.session_state.max_results_slider,
                     "min_score3_value": st.session_state.min_score3_slider,
                     "selected_model_key": st.session_state.model_key_selector,
@@ -1415,44 +1515,8 @@ if search_mode == "Keyword Search":
                     "speedup_threshold_value": st.session_state.speedup_threshold_slider
                 }
                 save_prefs_silent(new_prefs)
-                st.rerun()
-            
-            else:
-                # Just Sync Edits (Text changes, additions)
-                # If the user just edited text, we update state so it persists if they navigate away
-                # We do this check to avoid unnecessary saves/reruns loop, 
-                # but with st.data_editor, it only returns new df on interaction.
-                
-                # Extract current visible list
-                current_visible_list = edited_df["Queries"].astype(str).tolist()
-                current_visible_list = [q.strip() for q in current_visible_list if q.strip()]
-                
-                if current_visible_list != st.session_state.automated_queries:
-                    st.session_state.automated_queries = current_visible_list
-                    new_prefs = {
-                        "topics": [t.strip() for t in st.session_state.topics_txt.split(",") if t.strip()],
-                        "authors": [a.strip() for a in st.session_state.authors_txt.split(",") if a.strip()],
-                        "collection_id": st.session_state.user_zotero_collection,
-                        "library_id": st.session_state.user_zotero_id,
-                        "allow_duplicates": st.session_state.allow_duplicates,
-                        "semantic_sentences": st.session_state.semantic_sentences,
-                        "min_abstract_length_chars": st.session_state.abstract_length_slider,
-                        "ai_tag_categories_list": st.session_state.ai_tag_categories_list,
-                        "automated_queries": st.session_state.automated_queries, # UPDATED LIST
-                        "max_results_value": st.session_state.max_results_slider,
-                        "min_score3_value": st.session_state.min_score3_slider,
-                        "selected_model_key": st.session_state.model_key_selector,
-                        "search_mode_value": st.session_state.search_mode_selector,
-                        "search_source_value": st.session_state.search_source_selector,
-                        "vector_score_min_value": st.session_state.vector_score_min_slider,
-                        "query_mode_value": st.session_state.query_mode_selector,
-                        "add_to_zotero_state_value": st.session_state.add_to_zotero_state,
-                        "zotero_api_key_value": st.session_state.zotero_api_key,
-                        "ai_tag_post_filter_values": st.session_state.ai_tag_post_filter_values,
-                        "enable_speedup_value": st.session_state.enable_speedup_checkbox,
-                        "speedup_threshold_value": st.session_state.speedup_threshold_slider
-                    }
-                    save_prefs_silent(new_prefs)
+                if delete_btn or delete_all_btn:
+                    st.rerun()
 
             # C. CSV Upload Area
             st.markdown("---")
@@ -1469,8 +1533,11 @@ if search_mode == "Keyword Search":
                         if not row: continue
                         val = row[0].strip()
                         if not val or val.lower() in ["query", "queries", "keyword"]: continue
-                        if val not in st.session_state.automated_queries:
-                            st.session_state.automated_queries.append(val)
+                        
+                        # Add unique check (simple check against query text)
+                        existing_texts = [x['query'] for x in st.session_state.automated_queries]
+                        if val not in existing_texts:
+                            st.session_state.automated_queries.append({"query": val, "folder": ""})
                             added_count += 1
                     
                     if added_count > 0:
@@ -1572,31 +1639,42 @@ def run_cycle_logic(queries):
     # Cycle Management from State
     start_q_idx = st.session_state.cycle_state['query_idx']
     
+    # Map the selected query strings back to their objects to get folders
+    all_objs = st.session_state.automated_queries
+    # Create lookup
+    query_map = {obj['query']: obj for obj in all_objs}
+    
     for q_idx in range(start_q_idx, len(queries)):
-        query = queries[q_idx]
+        query_str = queries[q_idx]
         
         # Update state for resume (Query Level)
         st.session_state.cycle_state['query_idx'] = q_idx
         
-        status.info(f"Processing: {query}")
+        status.info(f"Processing: {query_str}")
         
         # --- FIX 2: Check for empty query inside loop ---
-        if not query or not query.strip():
+        if not query_str or not query_str.strip():
             st.warning(f"Skipping empty query at index {q_idx}")
             continue
 
-        # Initialize stats for this query cycle (Recalculated or Resumed?)
-        # For simplicity, stats reset on resume for the current query to ensure safety
+        # Initialize stats for this query cycle
         query_stats = st.session_state.cycle_state.get('query_stats', {
-                       
             'processed': 0, 'saved': 0, 'bypass_ai': False
         })
         
+        # Retrieve Per-Query Folder
+        folder_override = None
+        if query_str in query_map:
+            folder_override = query_map[query_str].get('folder', "").strip()
+        
+        if folder_override:
+            st.caption(f"📂 Target Collection: {folder_override}")
+
         # 1. Prepare Query
-        final_query = query
+        final_query = query_str
         if search_mode == "Keyword Search" and st.session_state.get("use_boolean_checkbox"):
-            res = gemini_boolean_query(query, actual_model_id)
-            final_query = res.get("boolean_query", query)
+            res = gemini_boolean_query(query_str, actual_model_id)
+            final_query = res.get("boolean_query", query_str)
             st.info(f"Boolean Query: {final_query}")
 
         # 2. Acquire
@@ -1612,17 +1690,30 @@ def run_cycle_logic(queries):
             source = st.session_state.search_source_selector
             if source in ["Semantic Scholar", "Both"]:
                 for chunk in search_semantic_scholar(final_query, st.session_state.max_results_slider, start_offset):
-                    a, s = process_chunk_and_save(chunk, final_query, 100, 0, status, prog, query_stats)
+                    a, s = process_chunk_and_save(chunk, final_query, 100, 0, status, prog, query_stats, collection_override=folder_override)
                     total_ann += a; total_save += s
             if source in ["PubMed", "Both"]:
-                 # Pubmed paging doesn't support fine-grained offset resume in this implementation easily without cache check
-                 # Relying on cache to skip network, process_chunk handles processing
                  p_res = search_pubmed_paged(final_query, st.session_state.max_results_slider)
-                 # Slicing for resume
                  p_res = p_res[start_offset:]
-                 if p_res:
-                    a, s = process_chunk_and_save(p_res, final_query, len(p_res), 0, status, prog, query_stats)
-                    total_ann += a; total_save += s
+                 
+                 # NEW LOGIC: Chunk the results into batches of 50 for AI processing
+                 total_pubmed = len(p_res)
+                 pubmed_processed_count = 0
+
+                 for batch in _chunks(p_res, 50): # Use existing _chunks function
+                    a, s = process_chunk_and_save(
+                        batch,
+                        final_query,
+                        total_pubmed, # Total for progress bar context
+                        pubmed_processed_count, # Offset for progress bar
+                        status,
+                        prog,
+                        query_stats,
+                        collection_override=folder_override
+                    )
+                    total_ann += a
+                    total_save += s
+                    pubmed_processed_count += len(batch)
 
         elif search_mode == "Paste citation / page text":
             refs = gemini_extract_from_text(st.session_state.paste_text, actual_model_id)
@@ -1635,17 +1726,13 @@ def run_cycle_logic(queries):
                     p = search_pubmed_paged(r["title"], 1)
                     if p: papers.append(p[0])
             if papers:
-                a, s = process_chunk_and_save(papers[start_offset:], final_query, len(papers), 0, status, prog, query_stats)
+                a, s = process_chunk_and_save(papers[start_offset:], final_query, len(papers), 0, status, prog, query_stats, collection_override=folder_override)
                 total_ann += a; total_save += s
 
         elif search_mode == "Lookup by URL / PDF":
             papers = search_by_url_doi_pdf(st.session_state.url_or_doi)
-
-                                                          
             if papers:
-                    
-                                           
-                a, s = process_chunk_and_save(papers[start_offset:], final_query, len(papers), 0, status, prog, query_stats)
+                a, s = process_chunk_and_save(papers[start_offset:], final_query, len(papers), 0, status, prog, query_stats, collection_override=folder_override)
                 total_ann += a; total_save += s
 
     st.success(f"Run Complete. Annotated: {total_ann}, Saved: {total_save}")
@@ -1686,8 +1773,14 @@ with c_go:
                  st.session_state.cycle_state['active'] = True
                  start_run = True
         else:
-            st.session_state.cycle_state['active'] = True
-            start_run = True
+            # Get strings from the multiselect safely (defaults to empty list if widget not rendered)
+            qs = st.session_state.get("cycle_queries_selector_str", [])
+            
+            if not qs:
+                st.error("No query selected.")
+            else:
+                st.session_state.cycle_state['active'] = True
+                start_run = True
 
 with c_pause:
     if st.button("⏸️ Pause"):
@@ -1719,7 +1812,8 @@ if start_run:
         if st.session_state.query_mode_selector == "Single Query":
             qs = [st.session_state.user_prompt_input]
         else:
-            qs = st.session_state.cycle_queries_selector
+            # Get strings from the multiselect
+            qs = st.session_state.get("cycle_queries_selector_str", [])
     else:
         qs = ["Single Execution"] # Dummy for other modes
         
