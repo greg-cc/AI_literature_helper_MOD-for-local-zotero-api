@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*- version 1.6 GUI tweaked for zero-shot tuning
+# -*- coding: utf-8 -*- version 1.7 WORKING - valid data passed to zotera.
 import streamlit as st
 import pandas as pd  # Required for the Data Editor
 import requests, json, re, os, io, csv
@@ -14,9 +14,19 @@ import numpy as np
 import math
 from typing import List, Dict, Any, Optional, Iterator, Tuple
 from google import genai
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin # <--- Added for relative link fixing
 
-# Configure logging
-logging.basicConfig(level=logging.DEBUG, format='[%(levelname)s] %(message)s', stream=sys.stdout)
+# ============================
+# LOGGING CONFIGURATION
+# ============================
+# 1. Set Root Logger to INFO
+logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s', stream=sys.stdout)
+
+# 2. SILENCE PDFMINER & URLLIB3
+logging.getLogger("pdfminer").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("http.client").setLevel(logging.WARNING)
 
 # --- GLOBAL API CONSTANTS ---
 MAX_RETRIES = 5
@@ -41,13 +51,12 @@ st.set_page_config(page_title="📚 AI Literature Helper", page_icon="🤖", lay
 
 if not os.path.exists(CONFIG_DIR): os.makedirs(CONFIG_DIR)
 
-
 # --- API KEYS ---
 # NOTE: In production, these should be environment variables or user inputs.
-SEMANTIC_SCHOLAR_API_KEY = ""
-GEMINI_API_KEY = ""
-NCBI_EMAIL = "@gmail.com"
-NCBI_API_KEY = ""
+SEMANTIC_SCHOLAR_API_KEY = "It2pKMHpTK7l5lnOhPUKE4ldBA3Lzeq82hHEsbnB"
+GEMINI_API_KEY = "AIzaSyDFlxX_6iRUmSX8A3bvQDyChf8Fdl9EKZA"
+NCBI_EMAIL = "reggcrowmell@gmail.com"
+NCBI_API_KEY = "89fb3103db9bd0586c75a45d0c6a65618108"
 
 # --- GEMINI CLIENT SETUP ---
 try:
@@ -126,17 +135,30 @@ MODEL_OPTIONS = {
 
 # --- DEFAULTS ---
 DEFAULT_AI_TAG_CATEGORIES = [
-    "Clinical Trial", "Review", "Methodology", "Case Study", "In Vivo", "In Vitro", "Phytochemistry", "Pharmacokinetics", "Toxicology"
+    "herbal drug discovery", "pharmaceutical drug discovery", "biology", "phytochemical", 
+    "Not drug development", "non herbal drug development", "other -  non-medical", "traditional medicine"
 ]
 
 # Structure: (Sentence, Enabled, Pass_State, Custom_Tag)
 DEFAULT_SEMANTIC_SENTENCES = [
-    ("The paper discusses researching infective agents of humans using phytochemicals.", True, True, "Infective-Agents"),
-    ("The paper is primarily a review or meta-analysis.", False, False, "Review"),
-    ("The paper is primarily about the biology of an organism.", False, True, "Biology"),
-    ("The content focuses on a medical study testing efficacy.", True, True, "Efficacy-Study"),
-    ("This content contains guidelines.", True, False, "Guidelines"),
-    ("This content is about how a disease progresses and how the disease itself works.", True, False, "Disease-Mechanism"),
+    ("The paper is a research paper on killing infective agents of humans using phytochemicals.", True, True, "phytochemicals"),
+    ("The paper is primarily a review or meta-analysis", True, False, "The-paper"),
+    ("The paper is primarily about the biology of an organism.", True, False, "The-paper"),
+    ("The paper is primarily about the physical location of an organism", True, False, "The-paper"),
+    ("The content focuses on a medical study testing the efficacy of a compound to treat an aliment.", True, True, "phytochemicals"),
+    ("The content focuses on a study testing efficacy of phytochemicals against an organism.", True, True, "phytochemicals"),
+    ("This content is related to things outside of health and medicine.", True, False, "This-content"),
+    ("This content is an analysis of medical advise and medical guidelines for doctors.", True, False, "This-content"),
+    ("This content analyzes the decision making process.", True, False, "This-content"),
+    ("This content discussed the logic of medical diagnosis and unnecessary therapy.", True, False, "This-content"),
+    ("This content is an analysis and overview for doctors.", True, False, "This-content"),
+    ("This paper details a research investigation seeking a cure.", True, True, "phytochemicals"),
+    ("This content contains herbal or herbal compounds being tested for the medicinal value.", True, True, "phytochemicals"),
+    ("This content does not contains herbal or herbal compounds being tested for the medicinal value.", True, False, "This-content"),
+    ("This content does not explore the medicinal value of herbal or herbal compounds.", True, False, "This-content"),
+    ("This content does explore the medicinal value of herbal or herbal compounds.", True, True, "phytochemicals"),
+    ("This contens discusses  Carotenoids OR Plant-Derived OR herbal extracts OR phytochemicals OR  Bioactive OR Phytonutrient OR Biologically Active OR Compounds OR ALKALOIDS OR TCM OR polyphenols OR plant extracts OR dose-dependent OR receptors OR synergistic OR phenolic acids OR  coumarins OR  stilbenes OR Terpenoids OR Terpenes OR Glucosinolates OR Organosulfur OR Phytosterols OR Saponins OR flavonoids", True, True, "phytochemicals"),
+    ("The content discusses x-rays or radiation therapy or chemotherapy or radiation sickness", True, False, "The")
 ]
 
 # ============================
@@ -207,7 +229,9 @@ def save_full_state(filename):
     try:
         with open(path, "w") as f:
             json.dump(state_dump, f, indent=2)
+        
         st.toast(f"✅ Configuration saved: {filename}")
+        
     except Exception as e:
         st.error(f"Save failed: {e}")
 
@@ -238,11 +262,43 @@ PREFS_FILE = "prefs.json"
 def load_prefs():
     # Only loads basics if no full config loaded
     default_prefs = {
-        "topics": [], "authors": [],
-        "collection_id": "", "library_id": "", "allow_duplicates": False,
-        "automated_queries": [],
+        "topics": [
+            "\"Carotenoids\"", "\"Plant-Derived\"", "\"herbal\"", "\"extracts\"", "\"phytochemicals\"", 
+            "\" Bioactive\"", "\"Phytonutrient\"", "\"Biologically Active\"", "\"Compounds\"", "\"ALKALOIDS\"", 
+            "\"TCM\"", "\"polyphenols\"", "\"plant extracts\"", "\"dose-dependent\"", "\"receptors\"", 
+            "\"synergistic\"", "\"phenolic acids\"", "\" coumarins\"", "\" stilbenes\"", "\"Terpenoids\"", 
+            "\"Terpenes\"", "\"Glucosinolates\"", "\"Organosulfur\"", "\"Phytosterols\"", "\"Saponins\"", "\"flavonoids\""
+        ],
+        "authors": [],
+        "collection_id": "CPEYXPTI",
+        "library_id": "18781930",
+        "allow_duplicates": False,
+        "automated_queries": [
+            {"query": "Lyme ALKALOIDS", "folder": ""}, {"query": "Lyme coumarins", "folder": ""}, 
+            {"query": "Lyme dose-dependent", "folder": ""}, {"query": "Lyme flavonoids", "folder": ""}, 
+            {"query": "Lyme Glucosinolates", "folder": ""}, {"query": "Lyme \"Molecular docking\"", "folder": ""}, 
+            {"query": "Lyme Organosulfur", "folder": ""}, {"query": "Lyme phenolic acids", "folder": ""}, 
+            {"query": "Lyme phytochemicals", "folder": ""}, {"query": "Lyme Phytonutrient", "folder": ""}, 
+            {"query": "Lyme Phytosterols", "folder": ""}, {"query": "Lyme \"plant extracts\"", "folder": ""}, 
+            {"query": "Lyme Plant-Derived", "folder": ""}, {"query": "Lyme polyphenols", "folder": ""}, 
+            {"query": "Lyme Saponins", "folder": ""}, {"query": "Lyme stilbenes", "folder": ""}, 
+            {"query": "Lyme TCM", "folder": ""}, {"query": "Lyme Terpenes", "folder": ""}, 
+            {"query": "Lyme Terpenoids", "folder": ""}, {"query": "Lyme Carotenoids", "folder": ""}
+        ],
         "ai_tag_categories_list": DEFAULT_AI_TAG_CATEGORIES,
-        "semantic_sentences": DEFAULT_SEMANTIC_SENTENCES
+        "semantic_sentences": DEFAULT_SEMANTIC_SENTENCES,
+        "max_results_value": 1000, 
+        "min_score3_value": 2, 
+        "min_abstract_length_chars": 68, 
+        "vector_score_min_value": 0.35, 
+        "model_key_selector": "models/gemini-2.0-flash-lite-preview-02-05",
+        "search_source_selector": "Semantic Scholar",
+        "query_mode_selector": "Automated Cycle",
+        "add_to_zotero_state_value": True,
+        "zotero_api_key_value": "",
+        "ai_tag_post_filter_values": [],
+        "enable_speedup_value": True,
+        "speedup_threshold_value": 7
     }
     if not os.path.exists(PREFS_FILE):
         return default_prefs
@@ -250,6 +306,53 @@ def load_prefs():
         return json.load(open(PREFS_FILE))
     except:
         return default_prefs
+
+def save_prefs(data):
+    """Saves preferences data to the prefs.json file."""
+    try:
+        with open(PREFS_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logging.error(f"Failed to save preferences: {e}")
+
+# --- FIX: Define save_current_settings to resolve NameError ---
+def save_current_settings():
+    """Collects all relevant session state variables and saves them via save_prefs."""
+    # Get current Ollama selection if available
+    ollama_sel = st.session_state.get("ollama_local_model_selector", "")
+    
+    new_prefs = {
+        "topics": [t.strip() for t in st.session_state.get("topics_txt", "").split(",") if t.strip()],
+        "authors": [a.strip() for a in st.session_state.get("authors_txt", "").split(",") if a.strip()],
+        "collection_id": st.session_state.get("user_zotero_collection", ""),
+        "library_id": st.session_state.get("user_zotero_id", ""),
+        "allow_duplicates": st.session_state.get("allow_duplicates", False),
+        "semantic_sentences": st.session_state.get("semantic_sentences", DEFAULT_SEMANTIC_SENTENCES),
+        "min_abstract_length_chars": st.session_state.get("abstract_length_slider", 150),
+        "ai_tag_categories_list": st.session_state.get("ai_tag_categories_list", DEFAULT_AI_TAG_CATEGORIES),
+        "automated_queries": st.session_state.get("automated_queries", []),
+        "max_results_value": st.session_state.get("max_results_slider", 20),
+        "min_score3_value": st.session_state.get("min_score3_slider", 2),
+        
+        # --- SAVING MODEL SELECTIONS ---
+        "selected_model_key": st.session_state.get("model_key_selector", "models/gemini-2.0-flash-lite-preview-02-05"), 
+        "selected_ollama_model": ollama_sel,
+        # -------------------------------
+        
+        "search_source_selector": st.session_state.get("search_source_selector", "Semantic Scholar"),
+        "search_mode_value": st.session_state.get("search_mode_selector", "Keyword Search"),
+        "vector_score_min_value": st.session_state.get("vector_score_min_slider", 0.50),
+        "query_mode_value": st.session_state.get("query_mode_selector", "Single Query"),
+        "add_to_zotero_state_value": st.session_state.get("add_to_zotero_state", True),
+        "zotero_api_key_value": st.session_state.get("zotero_api_key", ""),
+        "ai_tag_post_filter_values": st.session_state.get("ai_tag_post_filter_values", []),
+        "enable_speedup_value": st.session_state.get("enable_speedup_checkbox", False),
+        "speedup_threshold_value": st.session_state.get("speedup_threshold_slider", 9)
+    }
+    save_prefs(new_prefs)
+    st.toast("✅ Settings saved.")
+# -----------------------------------------------------------
+
 
 prefs = load_prefs()
 
@@ -263,6 +366,13 @@ for k, v in prefs.items():
     
     if k not in st.session_state and "_value" not in k:
         st.session_state[k] = v
+
+# --- RESTORE MODEL SELECTIONS FROM PREFS ---
+if "model_key_selector" not in st.session_state:
+    st.session_state.model_key_selector = prefs.get("selected_model_key", "models/gemini-2.0-flash-lite-preview-02-05")
+if "ollama_local_model_selector" not in st.session_state:
+    st.session_state.ollama_local_model_selector = prefs.get("selected_ollama_model", "")
+# -------------------------------------------
 
 if "automated_queries" not in st.session_state:
     st.session_state.automated_queries = []
@@ -335,33 +445,64 @@ def get_ollama_models():
     return []
 
 def query_ollama_chat(model, prompt, temperature=0.3):
-    """Queries local Ollama chat API. Retry loop added to prevent skips."""
+    """
+    Queries local Ollama chat API with STREAMING enabled.
+    1. Prints output to Console in Real-Time.
+    2. Implements a HARD TIMEOUT loop (abort if generation takes > 180s).
+    """
     url = f"{OLLAMA_BASE_URL}/chat"
+    
+    # 1. Enable Streaming
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "stream": False,
+        "stream": True, 
         "options": {"temperature": temperature}
     }
     
-    # Retry loop specifically for Ollama timeouts
-    max_ollama_retries = 3
-    for i in range(max_ollama_retries):
-        try:
-            # TIMEOUT UPDATED TO 900 SECONDS (15 Minutes)
-            resp = requests.post(url, json=payload, timeout=900) 
-            if resp.status_code == 200:
-                return resp.json().get('message', {}).get('content', '')
-            else:
-                logging.warning(f"Ollama Server Error {resp.status_code}. Retrying...")
-                sleep(2)
-        except requests.exceptions.ReadTimeout:
-            logging.warning(f"Ollama ReadTimeout (Attempt {i+1}/{max_ollama_retries}). Retrying...")
-            sleep(2)
-        except Exception as e:
-            return f"OLLAMA CONNECTION ERROR: {e}"
+    print(f"\n{'='*20} [OLLAMA STREAM START] {'='*20}")
+    
+    # HARD TIMEOUT SETTING (Seconds)
+    # If a single paper takes longer than this, we kill the connection.
+    MAX_GEN_TIME = 180 
+    start_time = time()
+    full_response = ""
+
+    try:
+        # Connect to Ollama (10s connect timeout)
+        with requests.post(url, json=payload, stream=True, timeout=10) as r:
+            r.raise_for_status()
             
-    return "OLLAMA ERROR: Max retries exceeded (Timeout)."
+            # Iterate over the stream line by line
+            for line in r.iter_lines():
+                # CHECK FOR TIMEOUT EVERY TOKEN
+                if (time() - start_time) > MAX_GEN_TIME:
+                    print(f"\n\n🚨 TIMEOUT: Generation exceeded {MAX_GEN_TIME}s. Aborting this record to free GPU.")
+                    return "ERROR: OLLAMA TIMEOUT"
+
+                if line:
+                    try:
+                        # Parse the JSON chunk
+                        body = json.loads(line)
+                        content = body.get('message', {}).get('content', '')
+                        
+                        # Print to Console immediately (Flush ensures no buffer delay)
+                        print(content, end="", flush=True)
+                        
+                        # Accumulate
+                        full_response += content
+                        
+                        if body.get('done', False):
+                            break
+                    except json.JSONDecodeError:
+                        pass
+                        
+    except Exception as e:
+        print(f"\n\n❌ OLLAMA STREAM ERROR: {e}")
+        return f"OLLAMA CONNECTION ERROR: {e}"
+        
+    print(f"\n{'='*20} [STREAM END] {'='*20}\n")
+    return full_response
 
 # --- GEMINI HELPERS ---
 def handle_gemini_backoff(error_msg: str):
@@ -450,6 +591,10 @@ def gemini_boolean_query(user_prompt, model):
     Output ONLY the boolean string.
     """
     
+    # --- LOGGING: Full Prompt Sent ---
+    provider_label = "OLLAMA" if use_ollama else "GEMINI"
+    print(f"\n{'='*40}\n[{provider_label} BOOLEAN PROMPT SENT]\n{prompt}\n{'='*40}\n")
+    
     # --- OLLAMA PATH ---
     if use_ollama:
         try:
@@ -461,10 +606,15 @@ def gemini_boolean_query(user_prompt, model):
 
     # --- GEMINI PATH ---
     max_retries = 3
+    
     for attempt in range(max_retries):
         try:
             sleep(GEMINI_DELAY) # Rate limit
             resp = client.models.generate_content(model=model, contents=prompt)
+            
+            # --- LOGGING: Raw Response Received ---
+            print(f"\n{'='*40}\n[GEMINI BOOLEAN RESPONSE]\n{resp.text}\n{'='*40}\n")
+            
             return {"boolean_query": resp.text.replace('```', '').strip()}
         except Exception as e:
             if attempt < max_retries - 1 and handle_gemini_backoff(str(e)):
@@ -485,15 +635,26 @@ def extract_pdf_text(url):
     """
     Downloads PDF and extracts text using PDFMiner.six.
     Limits to first 24 pages.
+    Handles PMC HTML pages by finding the actual PDF link.
+    Includes robust retry logic (4 attempts, 7s delay) for stubborn servers (Springer, etc.).
     """
     if not url: return ""
     
+    # --- USER FEEDBACK: EXTRACTION START ---
+    logging.info(f"📄 Extracting text from PDF: {url}... one moment.")
+    
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
+        # Improved headers to look more like a browser during retries
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Referer": "https://www.google.com/"
+        }
         
         # 1. HEAD request to check file size first (Save bandwidth)
         try:
-            head_resp = requests.head(url, headers=headers, timeout=3)
+            head_resp = requests.head(url, headers=headers, timeout=5)
             file_size = int(head_resp.headers.get('Content-Length', 0))
             if file_size > 15 * 1024 * 1024: # Skip if > 15MB
                 logging.warning(f"PDF too large ({file_size} bytes), skipping: {url}")
@@ -501,24 +662,205 @@ def extract_pdf_text(url):
         except:
             pass
 
-        # 2. GET request
-        r = requests.get(url, headers=headers, timeout=15)
-        if r.status_code != 200: return ""
+        # 2. GET request with RETRY LOGIC
+        # User requested: Reload 3-4 times, waiting 7 seconds each time.
+        r = None
+        max_retries = 4
+        retry_delay = 7
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                # 20s timeout for the actual download
+                r = requests.get(url, headers=headers, timeout=20) 
+                
+                if r.status_code == 200:
+                    # Basic check to ensure we didn't just get a tiny error page
+                    if len(r.content) > 500:
+                        break # Success
+                    else:
+                        logging.warning(f"PDF Attempt {attempt}: Content too small ({len(r.content)} bytes). Retrying in {retry_delay}s...")
+                else:
+                    logging.warning(f"PDF Attempt {attempt}: Status {r.status_code}. Retrying in {retry_delay}s...")
+            
+            except Exception as e:
+                logging.warning(f"PDF Attempt {attempt} Error: {e}. Retrying in {retry_delay}s...")
+            
+            # Wait before next retry, unless it's the last attempt
+            if attempt < max_retries:
+                sleep(retry_delay)
+
+        if not r or r.status_code != 200:
+            logging.error(f"Failed to download PDF after {max_retries} attempts.")
+            return ""
         
         # 3. Check content type
-        if "application/pdf" not in r.headers.get("Content-Type", "").lower():
-             if not r.content.startswith(b"%PDF"):
-                 return ""
+        content_type = r.headers.get("Content-Type", "").lower()
+        
+        # --- PMC / HTML HANDLING ---
+        if "application/pdf" not in content_type and "html" in content_type:
+            # Check if it's a PMC article page
+            if "ncbi.nlm.nih.gov/pmc/articles/PMC" in url or "pmc" in url.lower():
+                logging.info("Detected PMC HTML page. Searching for PDF link...")
+                soup = BeautifulSoup(r.content, 'html.parser')
+                
+                # Strategy: Look for links with .pdf extension or specific classes
+                pdf_link = soup.find('a', href=re.compile(r'\.pdf$', re.I))
+                
+                if pdf_link:
+                    # Construct absolute URL
+                    new_pdf_url = urljoin(url, pdf_link['href'])
+                    logging.info(f"🔗 Found actual PDF link: {new_pdf_url}")
+                    
+                    # Recursive call with the new PDF URL
+                    return extract_pdf_text(new_pdf_url)
+                else:
+                    logging.warning("Could not find PDF link on PMC page.")
+                    return ""
 
-        # 4. Extract Text using PDFMiner
-        # maxpages=24 ensures we don't process huge books
-        with io.BytesIO(r.content) as pdf_stream:
-            text = extract_text(pdf_stream, maxpages=24)
-            return text
+        # 4. Extract Text using PDFMiner (if it is a PDF)
+        if "application/pdf" in content_type or r.content.startswith(b"%PDF"):
+            with io.BytesIO(r.content) as pdf_stream:
+                text = extract_text(pdf_stream, maxpages=24)
+                return text
+        else:
+            logging.warning(f"Download successful but Content-Type was '{content_type}', not PDF.")
+            return ""
 
     except Exception as e:
         logging.error(f"PDFMiner Extract Error: {e}")
         return ""
+
+def extract_webpage_text(url):
+    """
+    Smart Harvester (Cluster/Density Update):
+    1. Detects Semantic Scholar URLs and finds 'External Link' button.
+    2. Resolves Publisher URLs.
+    3. Checks for <meta name="citation_pdf_url"> (Hidden PDF).
+    4. Falls back to "Cluster Density" Paragraph Hunting.
+       - Identifies the specific HTML container (div/article) with the most valid text.
+       - Ignores sidebars, footers, and reference lists outside that container.
+    """
+    if not url or url.endswith('.pdf'): return ""
+    
+    # --- USER FEEDBACK: EXTRACTION START ---
+    logging.info(f"🕵️ Smart Harvester investigating: {url}...")
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+    
+    try:
+        # STEP 1: S2 Button "Click" Logic (Keep existing logic)
+        if "semanticscholar.org" in url:
+            logging.info("Detected Semantic Scholar Page. Searching for External Link Button...")
+            s2_resp = requests.get(url, headers=headers, timeout=10)
+            if s2_resp.status_code == 200:
+                s2_soup = BeautifulSoup(s2_resp.content, 'html.parser')
+                ext_link = s2_soup.find("a", attrs={"data-heap-id": "paper-link"})
+                if not ext_link:
+                    ext_link = s2_soup.find("a", class_=lambda x: x and "icon-button" in x and "button--primary" in x)
+                
+                if ext_link and ext_link.get('href'):
+                    new_target = ext_link['href']
+                    logging.info(f"Found External Publisher Link on S2: {new_target}")
+                    return extract_webpage_text(new_target) # RECURSE
+        
+        # STEP 2: Request the Publisher Landing Page
+        resp = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+        if resp.status_code != 200: return ""
+        
+        # STEP 3: Check for "Hidden" PDF via Metadata
+        soup = BeautifulSoup(resp.content, 'html.parser')
+        pdf_meta = soup.find("meta", attrs={"name": "citation_pdf_url"})
+        if pdf_meta and pdf_meta.get("content"):
+            pdf_target = pdf_meta["content"]
+            logging.info(f"🎯 Found hidden PDF meta-tag: {pdf_target}")
+            extracted_pdf_text = extract_pdf_text(pdf_target)
+            if extracted_pdf_text and len(extracted_pdf_text) > 200:
+                return extracted_pdf_text
+
+        # STEP 4: Cluster Density Hunting (New Strategy)
+        logging.info("No direct PDF found. Running Cluster Density analysis...")
+        
+        # A. Remove structural clutter tags
+        for element in soup(["script", "style", "nav", "footer", "header", "meta", "noscript", "aside", "form", "button", "input", "iframe"]):
+            element.decompose()
+        
+        # B. Define Keywords for Garbage Filtering
+        garbage_triggers = [
+            "copyright", "all rights reserved", "download citation", "view author", 
+            "search author", "log in", "sign up", "et al.", "vol.", "pp.", "doi:", 
+            "google scholar", "pubmed", "crossref", "cited by", "similar articles"
+        ]
+
+        # C. Initialize Scoring
+        # We will map {Parent_Node: Score}
+        parent_scores = {}
+        
+        # Find ALL paragraphs in the document
+        all_paragraphs = soup.find_all('p')
+        
+        for p in all_paragraphs:
+            text = p.get_text(" ", strip=True)
+            
+            # --- FILTER LEVEL 1: Basic Hygiene ---
+            # Must be > 30 words and start with Uppercase
+            if len(text.split()) < 30: continue
+            if not text[0].isupper(): continue
+            if any(trigger in text.lower() for trigger in garbage_triggers): continue
+
+            # --- FILTER LEVEL 2: The "Three Sentence" Rule ---
+            # Split by sentence terminators followed by a Capital letter
+            sentences = re.split(r'[.!?]\s+(?=[A-Z])', text)
+            
+            # Must have at least 3 sentences
+            if len(sentences) < 3: continue
+            
+            # Count sentences with at least 4 words
+            valid_sentences_count = 0
+            for s in sentences:
+                if len(s.split()) >= 4:
+                    valid_sentences_count += 1
+            
+            # STRICT REQUIREMENT: At least 3 robust sentences
+            if valid_sentences_count < 3: continue
+
+            # --- SCORING ---
+            # If it passes, add the length of the text to the parent's score.
+            # This creates a "gravity well" around the main article div.
+            parent = p.parent
+            # Move up one level if the parent is just a generic wrapper (optional optimization)
+            if parent.name in ['span', 'strong', 'em', 'a']:
+                parent = parent.parent
+                
+            current_score = parent_scores.get(parent, 0)
+            parent_scores[parent] = current_score + len(text)
+
+        # D. Pick the Winner
+        if not parent_scores:
+            logging.warning("Cluster Analysis: No valid text clusters found.")
+            return ""
+
+        # Find the parent element with the highest score
+        best_parent = max(parent_scores, key=parent_scores.get)
+        logging.info(f"Cluster Analysis: Winner found (<{best_parent.name}>) with score {parent_scores[best_parent]}")
+
+        # E. Extract Text ONLY from the Winner
+        # We re-iterate through the winner's paragraphs to ensure order
+        final_blocks = []
+        for p in best_parent.find_all('p'):
+            t = p.get_text(" ", strip=True)
+            # Re-apply basic length filter to avoid caption snippets inside the main div
+            if len(t.split()) > 15: 
+                final_blocks.append(t)
+        
+        clean_text = "\n\n".join(final_blocks)
+        return clean_text[:40000]
+            
+    except Exception as e:
+        logging.warning(f"Smart Harvester Failed for {url}: {e}")
+    
+    return ""
 
 def check_zotero_duplicate(doi: str, library_id: str, collection_id: str) -> bool:
     """Checks Zotero Cloud API for existing DOI."""
@@ -544,33 +886,49 @@ def check_zotero_duplicate(doi: str, library_id: str, collection_id: str) -> boo
         pass
     return False
 
-def save_to_zotero_local(item_data: Dict[str, Any], collection_id: str = None) -> tuple[bool, str]:
-    """Posts record to local Zotero Connector."""
-    connector_url = "http://127.0.0.1:23119/connector/saveItems"
-    payload = {"items": [item_data]}
+def upload_to_zotero(payload_dict: Dict[str, Any], target_coll_id: str = None) -> tuple[bool, str]:
+    """
+    Posts record to local Zotero Connector.
+    Includes a 10-minute retry loop to handle Zotero syncing/busy states.
+    """
+    connector_endpoint = "http://127.0.0.1:23119/connector/saveItems"
+    final_payload = {"items": [payload_dict]}
     
-    # Try to pass collection ID if supported by connector (not standard, but helpful if user has Zotero plugin)
-    if collection_id:
-        payload["collectionId"] = collection_id 
+    if target_coll_id:
+					 
+        final_payload["collectionId"] = target_coll_id 
 
-    try:
-        # TIMEOUT INCREASED TO 5 MINUTES (300 seconds)
-        resp = requests.post(connector_url, json=payload, timeout=300)
-        resp.raise_for_status()
-        return True, "Item sent to Zotero."
-    except requests.exceptions.ConnectionError:
-        return False, "Connection refused. Is Zotero Desktop running?"
-    except Exception as e:
-        return False, str(e)
+    # 10 Minute Budget (600 seconds)
+    start_time = time()
+    MAX_WAIT = 600
+    
+    while (time() - start_time) < MAX_WAIT:
+        try:
+            # Brief pause to let Zotero breathe between requests
+            sleep(0.5)
+            
+            z_resp = requests.post(connector_endpoint, json=final_payload, timeout=60)
+            z_resp.raise_for_status()
+            return True, "Item sent to Zotero."
+            
+																	  
+        except Exception as e:
+            # If Zotero is busy (common during sync), wait and retry
+            # Logging this would show up in console, but we keep it silent to UI until timeout
+            sleep(5) # Wait 5 seconds before retrying
+            last_error = str(e)
 
-def delete_zotero_cloud_item(doi):
-    """Deletes an item from Zotero Cloud based on DOI search."""
+    return False, f"Zotero Timeout (10m): {last_error}"
+
+def delete_zotero_item(doi):
+    """Deletes an item from Zotero based on DOI search."""
     library_id = st.session_state.get("user_zotero_id")
     api_key = st.session_state.get("zotero_api_key")
     
     if not library_id or not api_key:
         return False, "Missing Library ID or API Key in settings."
     
+    # We must use the API because the Local Connector (127.0.0.1) does not permit deletion.
     base_url = f"https://api.zotero.org/users/{library_id}/items"
     headers = {"Zotero-API-Key": api_key}
     
@@ -581,13 +939,12 @@ def delete_zotero_cloud_item(doi):
         search_data = search_resp.json()
         
         if not search_data:
-            return False, "Item not found in Zotero Cloud."
+            return False, "Item not found in Zotero."
             
         item_key = search_data[0]['key']
         version = search_data[0]['version']
         
         # 2. Send Delete Request
-        # If-Match header ensures we don't delete if it changed meanwhile, usually safe to use version
         headers["If-Match"] = str(version)
         del_resp = requests.delete(f"{base_url}/{item_key}", headers=headers, timeout=10)
         
@@ -610,6 +967,10 @@ def gemini_extract_from_text(text, model):
     Text: {text[:15000]}
     """
     
+    # --- LOGGING: Full Prompt Sent ---
+    provider_label = "OLLAMA" if use_ollama else "GEMINI"
+    print(f"\n{'='*40}\n[{provider_label} EXTRACT PROMPT SENT]\n{prompt}\n{'='*40}\n")
+    
     # --- OLLAMA PATH ---
     if use_ollama:
         try:
@@ -626,6 +987,10 @@ def gemini_extract_from_text(text, model):
             sleep(GEMINI_DELAY)
             resp = client.models.generate_content(model=model, contents=prompt)
             js = re.sub(r'```json|```', '', resp.text).strip()
+            
+            # --- LOGGING: Raw Response Received ---
+            print(f"\n{'='*40}\n[GEMINI EXTRACT RESPONSE]\n{resp.text}\n{'='*40}\n")
+            
             return json.loads(js)
         except Exception as e:
             if attempt < max_retries - 1 and handle_gemini_backoff(str(e)):
@@ -708,17 +1073,29 @@ def remove_think_tags(text):
     """
     Removes content within <think>...</think> tags to avoid parsing the reasoning process.
     Handles multiple think blocks and case sensitivity.
+    Also handles stray </think> tags if the opening tag is missing.
     """
     if not text: return ""
-    # Remove <think>...</think> blocks (dotall to capture newlines)
+    
+    # 1. Remove complete blocks
     clean_text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    
+    # 2. Handle stray closing tags (common in streaming/interrupted outputs)
+    # If we see </think> but no <think>, remove everything before it.
+    if '</think>' in clean_text:
+        parts = clean_text.split('</think>')
+        # CRITICAL FIX: Only take the last part if it's not empty.
+        if parts[-1].strip():
+            clean_text = parts[-1]
+        else:
+            if len(parts) > 1:
+                clean_text = parts[0]
+        
     return clean_text.strip()
 
+                                                                 
 def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_query, model, suggested_tags=None, priority_topics=None):
     use_ollama = st.session_state.get("use_ollama", False)
-    
-    if not client and not use_ollama:
-        return "GEMINI API KEY MISSING", [], 0
     
     # --- PROMPT ---
     tags_instruction = ""
@@ -729,7 +1106,6 @@ def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_quer
 
     context_text = pdf_text[:40000] if pdf_text else 'N/A'
 
-    # UPDATED PROMPT BASED ON NEW INSTRUCTIONS
     prompt = f"""
     Analyze this scientific paper for a structured report.
     
@@ -738,139 +1114,174 @@ def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_quer
     Abstract: {snippet}
     Full Text Segment: {context_text}
     User Query: {user_query}
-    Priority Interests: {priority_topics}
+    Priority Interests (FOR EXTRACTION ONLY): {priority_topics}
 
     INSTRUCTIONS:
     1. ANALYZE RELEVANCE (0-3).
-    2. EXTRACT TAGS (Comma separated).
+       - Score based strictly on the alignment between the 'Priority Interests' list and the paper content.
+       - NEGATIVE CONSTRAINT: Do NOT consider the  'User Query' or 'Priority Interests' as verbiage to score. Only use the 'Title' and 'Abstract' to calculate the relevance score.
+    2. EXTRACT TAGS (Comma separated). {tags_instruction}
     3. SUMMARIZE findings (Bullet points).
-    4. EXTRACT BIO-SUBSTANCES (Phytochemicals and Plants distinct).
+    4. EXTRACT SUBSTANCES (Chemicals and Plants):
+       - Use 'Priority Interests' as a reference for what to look for.
+       - CRITICAL: Only list substances EXPLICITLY mentioned in the paper text provided above.
+       - DO NOT hallucinate plants or chemicals based on the 'Priority Interests' list.
+       - If the paper does not mention specific plants or chemicals, strictly write "None".
 
     OUTPUT FORMAT (STRICTLY USE THESE HEADERS):
     ###SCORE###
     <0, 1, 2, or 3>
-    ###PHYTOCHEMICAL and TARGET AILMENT TAGS###
+    ###TAGS###
     <tag1, tag2, tag3>
     ###SUMMARY###
     <Bullet points of key findings>
-    ###PHYTOCHEMICALS AND OTHER NATURAL COMPOUNDS###
-    <List of pure phytochemical, or "None">
+    ###CHEMICALS###
+    <List of pure chemicals found in the text, or "None">
     ###PLANTS###
-    <List of whole plants/herbs that the phytochemical came from, or "maybe from x,y,z" or "None">
+    <List of whole plants/herbs found in the text, or "None">
     """
     
-    # DEBUG: Log input prompt
-    print(f"\n\n{'='*20} AI INPUT PROMPT ({title}) {'='*20}\n{prompt}\n{'='*50}\n")
+    # --- LOGGING: Full Prompt Sent ---
+    provider_label = "OLLAMA" if use_ollama else "GEMINI"
+    print(f"\n{'='*40}\n[{provider_label} PROMPT SENT]\n{prompt}\n{'='*40}\n")
     
     raw_text = ""
     
     # --- API CALL ---
     try:
         if use_ollama:
+            # DIRECT CALL - NO CHECKS - NO ROADBLOCKS
             raw_text = query_ollama_chat(model, prompt)
-            if "OLLAMA" in raw_text: return raw_text, [], 0
-        else:
+            print(f"\n{'='*40}\n[OLLAMA RESPONSE]\n{raw_text}\n{'='*40}\n")
+        elif client:
             for attempt in range(3):
                 try:
                     sleep(GEMINI_DELAY)
                     resp = client.models.generate_content(model=model, contents=prompt)
                     raw_text = resp.text
+                    
+                    # --- LOGGING: Raw Response Received ---
+                    print(f"\n{'='*40}\n[GEMINI RESPONSE]\n{raw_text}\n{'='*40}\n")
+                    
                     break
                 except Exception as e:
                     if attempt < 2 and handle_gemini_backoff(str(e)): continue
-                    return f"API FAILURE: {e}", [], 0
-    except Exception as e:
-        return f"EXECUTION ERROR: {e}", [], 0
+                    # Error return structure updated to tuple(5)
+                    return f"API FAILURE: {e}", [], 0, "None", "None"
+        else:
+             # Error return structure updated to tuple(5)
+            return "API KEY MISSING", [], 0, "None", "None"
 
-    # DEBUG: Log raw response
-    print(f"\n\n{'='*20} AI RAW OUTPUT ({title}) {'='*20}\n{raw_text}\n{'='*50}\n")
+    except Exception as e:
+         # Error return structure updated to tuple(5)
+        return f"EXECUTION ERROR: {e}", [], 0, "None", "None"
 
     # --- PARSING ---
     text = remove_think_tags(raw_text)
 
-    # UPDATED REGEX to match new headers
-    score_match = re.search(r"###SCORE###\s*(\d+)", text, re.IGNORECASE)
-    # Regex updated for new long tag header
-    tags_match = re.search(r"###PHYTOCHEMICAL and TARGET AILMENT TAGS###\s*(.*?)(?=\n###|$)", text, re.DOTALL | re.IGNORECASE)
-    summary_match = re.search(r"###SUMMARY###\s*(.*?)(?=\n###|$)", text, re.DOTALL | re.IGNORECASE)
-    # Regex updated for new chemicals header
-    chems_match = re.search(r"###PHYTOCHEMICALS AND OTHER NATURAL COMPOUNDS###\s*(.*?)(?=\n###|$)", text, re.DOTALL | re.IGNORECASE)
-    plants_match = re.search(r"###PLANTS###\s*(.*?)(?=\n###|$)", text, re.DOTALL | re.IGNORECASE)
-
+    # Regex using the ### headers from the prompt
+    score_matches = re.findall(r"(?:\*\*|)?###\s*SCORE\s*###(?:\*\*|)?\s*(\d+)", text, re.IGNORECASE)
     score = 0
-    try:
-        if score_match: 
-            score = int(score_match.group(1))
+    if score_matches:
+        try:
+            score = int(score_matches[-1])
             if score > 3: score = 3
-    except: pass
+        except: pass
 
+    tags_matches = re.findall(r"(?:\*\*|)?###\s*TAGS\s*###(?:\*\*|)?\s*(.*?)(?=\n(?:\*\*|)?###|$)", text, re.DOTALL | re.IGNORECASE)
     tags = []
-    if tags_match:
-        # Clean newlines and split
-        raw_tags = tags_match.group(1).strip()
+    if tags_matches:
+        raw_tags = tags_matches[-1].strip()
         tags = [t.strip() for t in raw_tags.split(',') if t.strip()]
 
-    summary_txt = summary_match.group(1).strip() if summary_match else "Analysis unavailable."
-    chemicals = chems_match.group(1).strip() if chems_match else "None listed"
-    plants = plants_match.group(1).strip() if plants_match else "None listed"
+    summary_matches = re.findall(r"(?:\*\*|)?###\s*SUMMARY\s*###(?:\*\*|)?\s*(.*?)(?=\n(?:\*\*|)?###|$)", text, re.DOTALL | re.IGNORECASE)
+    summary_txt = summary_matches[-1].strip() if summary_matches else "Analysis unavailable."
 
-    # --- BUILD CLEAN REPORT (Substances Integrated into Section 2) ---
-    substances_display = ""
-    # Only show if not "None"
-    has_chem = len(chemicals) > 0 and "none" not in chemicals.lower()
-    has_plant = len(plants) > 0 and "none" not in plants.lower()
-    
-    if has_chem or has_plant:
-        substances_display = f"""
----
-**🧪 Bio-Substances**
-*   **Phytochemicals:** {chemicals}
-*   **Plants:** {plants}
-"""
+    chems_matches = re.findall(r"(?:\*\*|)?###\s*CHEMICALS\s*###(?:\*\*|)?\s*(.*?)(?=\n(?:\*\*|)?###|$)", text, re.DOTALL | re.IGNORECASE)
+    chemicals = chems_matches[-1].strip() if chems_matches else "None listed"
+
+    plants_matches = re.findall(r"(?:\*\*|)?###\s*PLANTS\s*###(?:\*\*|)?\s*(.*?)(?=\n(?:\*\*|)?###|$)", text, re.DOTALL | re.IGNORECASE)
+    plants = plants_matches[-1].strip() if plants_matches else "None listed"
+
+    # --- BUILD CLEAN REPORT ---
+    # UPDATED: Uses Unicode escape \U0001F9EA for the test tube emoji to prevent SyntaxError
+    substances_display = (
+        "\n---\n"
+        "**\U0001F9EA Substances & Plants**\n"
+        f"*   **Chemicals:** {chemicals}\n"
+        f"*   **Plants:** {plants}\n"
+    )
 
     clean_report = f"""
 **AI Abstract Summary**
 {summary_txt}
 {substances_display}
 """
-    return clean_report, tags, score
+    # RETURN TUPLE (5): report, tags, score, chemicals, plants                                                                          
+    return clean_report, tags, score, chemicals, plants
 
-def gemini_abstract_fallback(title, authors_info, current_snippet, model):
-    use_ollama = st.session_state.get("use_ollama", False)
-    if not client and not use_ollama: return current_snippet
-    
-    prompt = f"""
-    Generate a 3-sentence abstract for this paper based on metadata.
-    Title: {title}
-    Authors: {authors_info}
-    Output ONLY text.
+def gemini_abstract_fallback(title, authors_info, current_snippet, model, full_text=None):
     """
+    Generates an abstract.
+    PRIORITY 1: Summarize the PDF Full Text (if available).
+    PRIORITY 2: Hallucinate based on Title/Authors (only if no text available).
+    """
+    use_ollama = st.session_state.get("use_ollama", False)
     
-    text_out = current_snippet
+    # LOGIC CHANGE: Use full text if available
+    if full_text and len(full_text) > 500:
+        prompt = f"""
+        Summarize the following academic text into a concise abstract (approx 150 words).
+        Focus on the objectives, methods, and results.
+        
+        TEXT SOURCE:
+        {full_text[:15000]}
+        """
+    else:
+        # Fallback to the "Guess" if we couldn't get the PDF
+        prompt = f"""
+        Generate a 3-sentence abstract for this paper based on metadata.
+        Title: {title}
+        Authors: {authors_info}
+        Output ONLY text.
+        """
+    
+    # --- LOGGING: Full Prompt Sent ---
+    provider_label = "OLLAMA" if use_ollama else "GEMINI"
+    # User requested display for troubleshooting:
+    print(f"\n{'='*40}\n[ABSTRACT NOT FOUND - {provider_label} FALLBACK PROMPT SENT]\n{prompt}\n{'='*40}\n")
     
     # --- OLLAMA PATH ---
     if use_ollama:
         try:
-            raw = query_ollama_chat(model, prompt)
-            text_out = raw
-        except:
-            pass # Keep default
-    else:
+            resp = query_ollama_chat(model, prompt)
+            # --- LOGGING: Full Response Received ---
+            print(f"\n{'='*40}\n[ABSTRACT NOT FOUND - {provider_label} FALLBACK RESPONSE]\n{resp}\n{'='*40}\n")
+            return resp
+        except Exception as e:
+            print(f"OLLAMA FALLBACK ERROR: {e}")
+            return current_snippet
+
     # --- GEMINI PATH ---
+    if client:
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 sleep(GEMINI_DELAY) # Rate limit
                 resp = client.models.generate_content(model=model, contents=prompt)
-                text_out = resp.text.strip()
-                break
+                resp_text = resp.text.strip()
+                
+                # --- LOGGING: Raw Response Received ---
+                print(f"\n{'='*40}\n[ABSTRACT NOT FOUND - GEMINI FALLBACK RESPONSE]\n{resp.text}\n{'='*40}\n")
+                
+                return resp_text
             except Exception as e:
                 if attempt < max_retries - 1 and handle_gemini_backoff(str(e)):
                     logging.info(f"Retrying Abstract Fallback (Attempt {attempt+2}/{max_retries})...")
                     continue
-    
-    # Clean any <think> tags from the output before returning
-    return remove_think_tags(text_out)
+                return current_snippet
+       
+    return current_snippet
 
 def prerank_papers(papers_meta, user_prompt, semantic_model):
     if not papers_meta or not user_prompt or not semantic_model:
@@ -896,6 +1307,7 @@ def add_new_sentence():
         st.session_state.semantic_sentences.append((ns, True, True, default_tag))
         st.session_state.new_sentence_input = ""
         save_current_settings()
+                                                                     
 
 def delete_sentence(idx):
     st.session_state.semantic_sentences.pop(idx)
@@ -993,16 +1405,18 @@ def search_semantic_scholar(query: str, limit: int, start_offset: int = 0) -> It
                 if not paper_title:
                     paper_title = "Untitled Paper"
 
+                abstract_text = clean_snippet(paper.get("abstract",""))
+                
                 page_recs.append({
                     "title": paper_title,
                     "url": paper.get("url", "") or (f"https://doi.org/{doi}" if doi else ""),
                     "authors_info": ", ".join([a.get("name","") for a in paper.get("authors",[])]),
-                    "snippet": clean_snippet(paper.get("abstract","")),
+                    "snippet": abstract_text,
                     "pdf_url": (paper.get("openAccessPdf") or {}).get("url",""),
                     "doi": doi,
                     "venue": paper.get("venue"),
                     "year": paper.get("year"),
-                    "original_abstract": clean_snippet(paper.get("abstract",""))
+                    "original_abstract": abstract_text # <-- SAVES ORIGINAL
                 })
             
             for chunk in _chunks(page_recs, PROCESSING_BATCH_SIZE):
@@ -1024,15 +1438,19 @@ def search_semantic_scholar_by_doi(doi: str):
         sleep(SEMANTIC_SCHOLAR_DELAY) # ENFORCED DELAY
         p = _request_json_with_retries(url, params=params, headers=headers)
         if not p: return None
+        
+        abstract_text = clean_snippet(p.get("abstract", ""))
+        
         return {
             "title": p.get("title") or "Untitled Paper",
             "url": p.get("url", "") or f"https://doi.org/{doi}",
             "authors_info": ", ".join([a.get("name","") for a in p.get("authors",[])]),
-            "snippet": clean_snippet(p.get("abstract", "")),
+            "snippet": abstract_text,
             "pdf_url": (p.get("openAccessPdf") or {}).get("url", ""),
             "doi": (p.get("externalIds") or {}).get("DOI") or doi,
             "year": p.get("year"),
-            "venue": p.get("venue")
+            "venue": p.get("venue"),
+            "original_abstract": abstract_text # <-- SAVES ORIGINAL
         }
     except Exception:
         return None
@@ -1113,14 +1531,17 @@ def search_pubmed_paged(query, limit=10, start_offset=0):
         for aid in r.get("articleids", []):
             if aid.get("idtype") == "doi": doi = aid.get("value"); break
             
+        abstract_text = abstracts.get(pmid, "")
+        
         out.append({
             "title": r.get("title") or "Untitled Paper",
             "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
             "authors_info": ", ".join([a.get("name","") for a in r.get("authors", [])]),
-            "snippet": abstracts.get(pmid, ""),
+            "snippet": abstract_text,
             "doi": doi,
             "venue": r.get("fulljournalname"),
-            "year": int(r.get("pubdate", "0")[:4]) if r.get("pubdate") else None
+            "year": int(r.get("pubdate", "0")[:4]) if r.get("pubdate") else None,
+            "original_abstract": abstract_text # <-- SAVES ORIGINAL
         })
     
     st.session_state.search_cache[cache_key] = out
@@ -1154,12 +1575,14 @@ def search_by_url_doi_pdf(url_or_doi):
                     p["pdf_text"] = text
                     return [p]
             
+            extracted_snippet = text[:500]
             return [{
                 "title": "Extracted PDF",
                 "url": url_or_doi,
-                "snippet": text[:500],
+                "snippet": extracted_snippet,
                 "pdf_text": text,
-                "snippet_source": "PDF_EXTRACT"
+                "snippet_source": "PDF_EXTRACT",
+                "original_abstract": extracted_snippet # <-- ADDED FOR CONSISTENCY
             }]
     return []
 
@@ -1167,317 +1590,311 @@ def search_by_url_doi_pdf(url_or_doi):
 # DISPLAY & PROCESSING (UPDATED REPORT & AUDIT)
 # ============================
 
-def _display_paper_details(paper_data):
-    """Render a single paper details card from dictionary."""
-    
-    # --- SECTION A: CYCLE SEPARATOR (RICH HEADER) ---
-    if paper_data.get('is_separator'):
-        st.markdown(f"# 🔄 CYCLE START: **{paper_data['query']}**")
-        
-        # Contextual Details Expander
-        with st.expander("ℹ️ **Cycle & Configuration Manifest**", expanded=False):
-            # 1. Execution Settings
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.markdown("**🔍 Query Settings**")
-                st.write(f"- **Query:** `{paper_data.get('query')}`")
-                st.write(f"- **Records:** {paper_data.get('start')} to {paper_data.get('stop')}")
-                st.write(f"- **Vector Min:** {paper_data.get('vector_min')}")
-                st.write(f"- **Target Collection:** `{paper_data.get('collection')}`")
-            with c2:
-                st.markdown("**⚙️ Configuration**")
-                st.write(f"- **Config File:** `{paper_data.get('config_file')}`")
-                st.write(f"- **AI Model:** `{paper_data.get('model')}`")
-                st.write(f"- **Vector Source:** `all-MiniLM-L6-v2`")
-                st.write(f"- **Boolean Mode:** `{paper_data.get('use_bool')}`")
-            with c3:
-                st.markdown("**🏷️ Filters & Tags**")
-                st.write(f"- **Target Tags:** {paper_data.get('targets')}")
-                st.write(f"- **Value Filters:** {paper_data.get('filters')}")
-                st.write(f"- **Speed-Up Active:** {paper_data.get('speedup_active')}")
-
-            st.markdown("---")
-            st.markdown("**🧠 Semantic Sentences Used:**")
-            for sent in paper_data.get('semantic_sents', []):
-                st.caption(f"- {sent}")
-                
-            st.markdown("**📌 Priority Topics:**")
-            st.caption(paper_data.get('topics'))
-
-        st.divider()
-        return
-
-    # --- SECTION B: PAPER REPORT ---
+def _display_paper_details(paper_data, idx_key):
+    """Render a single paper details card matching the provided screenshot design."""
     paper = paper_data.get('paper', {})
     score = paper_data.get('score', 0)
     tags = paper_data.get('tags', [])
     ai_report_body = paper_data.get('abstract_ai', "")
-    passes = paper_data.get('passes', False)
-    
-    vector_score = paper.get('vector_score', 0.0)
-    process_time = paper_data.get('process_time', 0.0)
-    z_thresh = paper_data.get('z_thresh', 0)
-    
-    # Metadata for Display Header
-    query_used = paper_data.get('query_used', 'N/A')
-    model_used = paper_data.get('model_used', 'N/A')
-    vec_min_setting = paper_data.get('vec_min_used', 0.0)
-    semantic_sentence = paper_data.get('semantic_match_sentence', None)
-    content_len = paper_data.get('content_length', 0)
-    
-    skip_reason = paper_data.get('skip_reason', "Score too low") 
     
     title = paper.get("title") or "Untitled Paper"
     url = paper.get("url", "#")
-    doi = paper.get("doi")
-    date_str = paper.get("year") or "N/A" 
+    doi = paper.get("doi", "N/A")
     
     status_msg = paper_data.get('status_msg', "") 
+    reason = paper_data.get('reason', "")
     
-    # Icon logic
+    # Icon and Expand State
     icon = "✅" if status_msg == "SAVED" else ("🚫" if status_msg == "DUPLICATE" else "⚠️")
     
-    with st.expander(f"{icon} {title}", expanded=(status_msg == "SAVED")):
-        
-        # 1. NEW: RUN CONFIGURATION & METADATA (Top of report)
-        st.caption("📝 **Run Configuration & Classification Details**")
-        meta_cols = st.columns(4)
-        meta_cols[0].markdown(f"**Query:**\n`{query_used}`")
-        meta_cols[1].markdown(f"**Vector Min:**\n`{vec_min_setting:.2f}`")
-        meta_cols[2].markdown(f"**AI Model:**\n`{model_used}`")
-        
-        trig_text = f"**Semantic Trigger:**\n*{semantic_sentence}*" if semantic_sentence else "**Semantic Trigger:**\n*None*"
-        # Append Length Info
-        trig_text += f"\n\n**Content Len:** `{content_len}` chars"
-        
-        meta_cols[3].markdown(trig_text)
-        
-        st.markdown("---")
+    # Construct Header Label (Status + Score + Title + Reason)
+    header_label = f"{icon} [Score: {score}/3] {title}"
+    if status_msg != "SAVED" and status_msg != "DUPLICATE":
+        header_label += f" | {reason}"
+    elif status_msg == "SAVED":
+        header_label += " | SAVED"
 
-        if url and url != "#":
-            st.markdown(f"<h1><a href='{url}' style='text-decoration:none; color:inherit;'>{title}</a></h1>", unsafe_allow_html=True) 
-        else:
-            st.markdown(f"<h1>{title}</h1>", unsafe_allow_html=True)
+    # INJECT CSS FOR EXPANDER HEADER (Single line string to prevent SyntaxError)
+    st.markdown(
+        "<style>.streamlit-expanderHeader {font-size: 1.2rem !important; font-weight: bold !important;}</style>",
+        unsafe_allow_html=True
+    )
+    
+    with st.expander(header_label, expanded=(status_msg == "SAVED")):
         
-        # --- BIG COLORFUL STATUS BAR ---
-        if status_msg == "SAVED":
-            bar_text = f"**SAVED** | AI Score: {score}/3 | Vector Sim: {vector_score:.2f} | Time: {process_time:.2f}s | Tags: {len(tags)}"
-            st.success(bar_text)
-        elif status_msg == "DUPLICATE":
-            bar_text = f"**DUPLICATE** | DOI: {doi} | Time: {process_time:.2f}s"
-            st.warning(bar_text)
-        elif status_msg == "DELETED":
-            st.error(f"**DELETED** | {title}")
-        else:
-            bar_text = f"**SKIPPED** | Reason: {skip_reason} | Vector Sim: {vector_score:.2f}"
-            st.error(bar_text)
-
-        # --- METADATA SECTION ---
-        st.markdown("## 1. Citation Data")
-        st.markdown(f"* **Authors:** {paper.get('authors_info','')}")
-        st.markdown(f"* **Date:** {date_str}")
-        if doi: st.markdown(f"* **DOI:** `{doi}`")
+        # 1. CITATION DATA
+        st.markdown("### 1. Citation Data")
+        st.markdown(f"**Authors:** {paper.get('authors_info', 'N/A')}")
+        st.markdown(f"**DOI:** [{doi}](https://doi.org/{doi})")
+        if url: st.markdown(f"**Link:** [Open Source]({url})")
         
-        # --- ABSTRACTS (Side by Side) ---
-        st.markdown("## 2. Abstracts")
-        c_left, c_right = st.columns(2)
-        with c_left:
-            st.info(f"**Source Abstract**\n\n{paper.get('snippet', 'No abstract')}")
-        with c_right:
-            if ai_report_body:
+        # 2. ABSTRACTS (Split View: Source Left, AI Right)
+        st.markdown("### 2. Abstracts")
+        
+        col_src, col_ai = st.columns(2)
+        
+        with col_src:
+            # ORIGINAL ABSTRACT ONLY (Unmodified)
+            raw_abstract = paper.get('original_abstract', paper.get('snippet', 'No abstract available.'))
+            
+            st.caption("Source Abstract")
+            st.info(raw_abstract) 
+        
+        with col_ai:
+            st.caption("AI Abstract Summary")
+            if ai_report_body and "Duplicate" not in ai_report_body:
                 st.markdown(ai_report_body)
             else:
-                st.caption("No AI Analysis available.")
-
-        # --- CATEGORIZATION ---
-        st.markdown("## 3. Categorization")
-        if tags: st.markdown(f"**Tags:** {', '.join(tags)}")
-
-        # --- ACTIONS ---
-        st.markdown("---")
-        btn_col1, btn_col2 = st.columns([1, 1])
+                st.caption("Analysis unavailable.")
         
-        with btn_col1:
-            if st.button("📤 Upload to Zotero", key=f"save_{hash(title) + int(time())}"):
-                # --- Zotero Text: Include AI Analysis + Source ---
-                full_zotero_abstract = f"== AI ANALYSIS & REPORT ==\n{ai_report_body}\n\n== SOURCE ABSTRACT ==\n{paper.get('snippet', 'No abstract available.')}"
-                item = {
-                    "itemType": "journalArticle",
-                    "title": paper.get("title"),
-                    "creators": parse_authors(paper.get("authors_info")),
-                    "abstractNote": full_zotero_abstract[:ZOTERO_MAX_ABSTRACT_CHARS],
-                    "date": str(date_str), 
-                    "tags": [{"tag": t[:MAX_TAG_LENGTH]} for t in tags],
-                    "url": with_ntu_proxy(doi or paper.get("url")),
-                    "DOI": doi
-                }
-                # Attempt to use the collection from automated queries if running, or default
-                current_coll = st.session_state.user_zotero_collection
-                ok, msg = save_to_zotero_local(item, collection_id=current_coll)
-                if ok:
-                    st.toast(f"✅ Saved to Zotero: {title}")
-                    paper_data['status_msg'] = "SAVED" 
-                else:
-                    st.error(f"Zotero Error: {msg}")
+        # 3. CATEGORIZATION
+        st.markdown("### 3. Categorization")
+        
+        # --- FIX: ROBUST TAG HANDLING ---
+        # Semantic search adds tuples: (Tag, Sentence). We must extract just the Tag.
+        safe_tags = []
+        if tags:
+            for t in tags:
+                if isinstance(t, tuple) and len(t) > 0:
+                    safe_tags.append(str(t[0])) # Extract tag name from tuple
+                elif t:
+                    safe_tags.append(str(t)) # Handle normal strings
+        
+        st.markdown(f"**Tags:** {', '.join(safe_tags) if safe_tags else 'None detected'}")
+        # -------------------------------
+        
+        # ACTIONS
+        st.markdown("---")
+        if st.button("📤 Upload to Zotero", key=f"btn_save_{idx_key}"):
+            # Sanitize tags: Ensure string type and truncate to limit
+            clean_tags = []
+            for t in tags:
+                if isinstance(t, str):
+                    clean_tags.append({"tag": t[:MAX_TAG_LENGTH]})
+                elif isinstance(t, tuple) and len(t) > 0:
+                    # Handle accidental tuple tags from semantic search
+                    clean_tags.append({"tag": str(t[0])[:MAX_TAG_LENGTH]})
+            
+            item = {
+                "itemType": "journalArticle",
+                "title": paper.get("title"),
+                "creators": parse_authors(paper.get("authors_info")),
+                "abstractNote": (paper.get("original_abstract") or paper.get("snippet"))[:ZOTERO_MAX_ABSTRACT_CHARS],
+                "date": str(paper.get("year") or ""),
+                "tags": clean_tags,
+                "url": with_ntu_proxy(doi or paper.get("url")),
+                "DOI": doi
+            }
+            current_coll = st.session_state.user_zotero_collection
+            ok, msg = upload_to_zotero(item, target_coll_id=current_coll)
+            if ok: st.toast(f"✅ Saved to Zotero: {title}")
+            else: st.error(f"Zotero Error: {msg}")
 
-        # NEW: DELETE BUTTON
-        with btn_col2:
-            if doi and st.button("🗑️ Delete from Zotero (Cloud)", key=f"del_{hash(title)}", type="secondary"):
-                ok, msg = delete_zotero_cloud_item(doi)
-                if ok:
-                    st.toast(f"🗑️ Deleted: {title}")
-                    paper_data['status_msg'] = "DELETED"
-                else:
-                    st.error(f"Delete Error: {msg}")
-
-def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_ph, prog_ph, query_stats, vector_threshold, collection_override=None):
+def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_ph, prog_ph, query_stats, collection_override=None, vec_min_override=None):
     annotated = 0
     saved = 0
     
-    # Determine which collection to use (Query Specific vs Global Default)
+    # Determine which collection to use
     target_collection = collection_override if collection_override else st.session_state.user_zotero_collection
 
+    # UI Settings
     min_len = st.session_state.abstract_length_slider
     z_thresh = st.session_state.min_score3_slider
-    # Updated: Use Passed Argument for Vector Min
-    vec_min = vector_threshold
     
+    # --- LOGIC UPDATE: USE ROW SETTING IF AVAILABLE, ELSE GLOBAL SLIDER ---
+    if vec_min_override is not None:
+        vec_min = float(vec_min_override)
+    else:
+        vec_min = st.session_state.vector_score_min_slider
+    # ----------------------------------------------------------------------
+    
+    # Filter Config
     req_vals = [v.lower() for v in st.session_state.ai_tag_post_filter_values]
     suggested_tags = st.session_state.selected_tag_categories
     
+    # Speed Up Settings
     enable_speedup = st.session_state.enable_speedup_checkbox
     speedup_threshold = st.session_state.speedup_threshold_slider
     
-    # AI Model Resolution (LOCAL AWARE)
+    # AI Model Resolution
     if st.session_state.get("use_ollama"):
         actual_model_id = st.session_state.get("ollama_local_model_selector", "llama3")
     else:
         selected_key = st.session_state.model_key_selector
         actual_model_id = MODEL_OPTIONS[selected_key]["model_id"]
     
-    # Context (ADDITIVE LOGIC)
+    # Context
     topics_context = st.session_state.get("topics_txt", "")
 
-    # 1. Prerank (Audit Visible: Do not hard filter here)
+    # 1. Preranking & Vector Filter
     sem_model = get_embedding_model()
     if sem_model:
         chunk = prerank_papers(chunk, query, sem_model)
+        # Use the variable 'vec_min' determined above
+        if vec_min > 0.0:
+            original_count = len(chunk)
+            chunk = [p for p in chunk if p.get('vector_score', 0) >= vec_min]
+            dropped = original_count - len(chunk)
+            if dropped > 0:
+                logging.info(f"Vector Filter: Dropped {dropped} papers (Score < {vec_min})")
     
-    # If chunk is empty after filter, return early
-    if not chunk:
-        return 0, 0
+    if not chunk: return 0, 0
 
     for i, paper in enumerate(chunk):
-        start_time = time() # START TIMER
+        start_time = time()
         idx = papers_processed + i
-        
-        # --- CHECK SPEEDUP STATUS ---
         bypass_ai = query_stats.get('bypass_ai', False)
         
+        # --- LOGGING UPDATE: Display Raw Source Data if Abstract Missing ---
+        initial_snippet = paper.get("snippet", "")
+        print(f"\n{'='*40}\n[PROCESSING RECORD {idx+1}]\nTITLE: {paper.get('title')}")
+        
+        if not initial_snippet:
+            # If missing, show the user exactly what the API gave us (excluding huge fields)
+            debug_paper = {k: v for k, v in paper.items() if k != 'original_abstract'}
+            print(f"SOURCE VERBIAGE: ((NO ABSTRACT FOUND))")
+            print(f"RAW METADATA DUMP: {debug_paper}")
+        else:
+            print(f"SOURCE VERBIAGE (First 500 chars):\n{initial_snippet[:500]}...")
+        print(f"{'='*40}\n")
+        # ------------------------------------------------
+
         # 2. Duplicate Check
         doi = paper.get("doi")
         is_dup = False
         if doi and (not st.session_state.allow_duplicates) and check_zotero_duplicate(doi, st.session_state.user_zotero_id, target_collection):
              is_dup = True
 
-        # Check Vector Score Status
-        vec_score = paper.get('vector_score', 0.0)
-        vector_fail = (sem_model is not None) and (vec_score < vec_min)
+        # ==========================================================
+        # 3. TEXT EXTRACTION HIERARCHY (Updated with Smart Harvester)
+        # ==========================================================
+        full_text_context = ""
+        
+        # LOGIC INJECTION: Check if Abstract exists in metadata
+        current_snippet = paper.get("snippet", "")
+        
+        if current_snippet and len(current_snippet) >= min_len:
+             logging.info(f"✅ Abstract Sourced from Metadata (Skipping PDF/Web): {paper.get('title')[:30]}...")
+             paper["snippet_source"] = "METADATA"
+        
+        elif not bypass_ai:
+            logging.info(f"📉 Abstract Missing/Short: Initiating Smart Harvest for {paper.get('title')[:30]}...")
+            
+            # --- THE FIX: DETERMINE TARGET URL FOR "CLICK" ---
+            target_url = ""
+            # Priority 1: Use DOI to "click" through to publisher (Standard)
+            if paper.get("doi"):
+                 target_url = f"https://doi.org/{paper.get('doi')}"
+            # Priority 2: Use the provided URL (S2 page or direct link)
+            elif paper.get("url"):
+                 target_url = paper.get("url")
+            
+            if target_url:
+                # Trigger the Smart Harvester (extract_webpage_text now handles the detective work)
+                full_text_context = extract_webpage_text(target_url)
 
-        # 3. Abstract Fallback
+                # --- UPDATE UI IF API FAILED BUT SCRAPER WORKED ---
+                if not paper.get("original_abstract") and full_text_context:
+                    # Limit to 3000 chars for display so it doesn't flood the UI
+                    paper["original_abstract"] = full_text_context[:3000] + ("..." if len(full_text_context) > 3000 else "")
+
+        # 4. Abstract Fallback
+        # If the original snippet is too short, we ask AI to generate one using the full text we just found.
         snip = paper.get("snippet", "")
-        if len(snip) < min_len and not vector_fail and not is_dup:
+        if len(snip) < min_len:
             if not bypass_ai:
-                snip = gemini_abstract_fallback(paper.get("title"), paper.get("authors_info"), snip, actual_model_id)
+                # NOTE: logging of the "Complete Verb" happens inside this function
+                snip = gemini_abstract_fallback(paper.get("title"), paper.get("authors_info"), snip, actual_model_id, full_text=full_text_context)
                 paper["snippet"] = snip
                 paper["snippet_source"] = "AI_FALLBACK"
 
-        # 4. PDF Text (Skip if bypassed)
-        pdf_text = ""
-        if not bypass_ai and not vector_fail and not is_dup:
-            pdf_text = paper.get("pdf_text") or extract_pdf_text(paper.get("pdf_url") or paper.get("url"))
-
-        # 5. AI Annotation
-        ai_abs = ""; tags = []; score = 0; skip_reason = ""
-        semantic_trigger_sentence = None 
-
+        # 5. AI Annotation (Updated Unpacking for Chemicals/Plants)
         if is_dup:
-            status_msg = "DUPLICATE"
-            ai_abs = "Duplicate - Skipped Analysis"
-        elif vector_fail:
-            status_msg = "SKIPPED"
-            skip_reason = f"Vector Score ({vec_score:.2f}) < Min ({vec_min:.2f})"
-            ai_abs = "Skipped due to low vector similarity."
+            ai_abs, tags, score, chemicals, plants = "Duplicate - Skipped Analysis", [], 0, "None", "None"
         elif bypass_ai:
-            ai_abs = "Auto-Saved (Speed Mode)"
-            tags = ["Speed-Save"]
-            score = 3
-            status_msg = "SAVED"
+            ai_abs, tags, score, chemicals, plants = "Auto-Saved (Speed Mode)", ["Speed-Save"], 3, "Skipped", "Skipped"
         else:
-            # ADDITIVE CONTEXT PASSED HERE
-            ai_abs, tags, score = gemini_annotate_paper(
-                paper.get("title"), paper.get("authors_info"), snip, pdf_text, paper.get("url"), query, actual_model_id,
+            ai_abs, tags, score, chemicals, plants = gemini_annotate_paper(
+                paper.get("title"), paper.get("authors_info"), snip, full_text_context, paper.get("url"), query, actual_model_id,
                 suggested_tags=suggested_tags, priority_topics=topics_context
             )
             if "API FAILURE" not in ai_abs: annotated += 1
 
-            # Semantic Tags (Winner Takes All Logic)
-            if sem_model:
-                sem_matches = generate_semantic_tags(ai_abs if not bypass_ai else snip, st.session_state.semantic_sentences, sem_model)
-                if sem_matches:
-                    for s_tag, s_sent in sem_matches:
-                        tags.append(s_tag)
-                        if semantic_trigger_sentence is None:
-                            semantic_trigger_sentence = s_sent 
+        # 6. Semantic Tags
+        if sem_model and "API FAILURE" not in ai_abs and not is_dup:
+            stags = generate_semantic_tags(ai_abs if not bypass_ai else snip, st.session_state.semantic_sentences, sem_model)
+            tags.extend(stags)
 
-            # 7. Save Logic (Value Filter)
-            passes = True
-            if req_vals:
-                t_lower = {t.lower() for t in tags}
-                passes = any(v in t for t in t_lower for v in req_vals)
+        # 7. Save Logic & Filtering
+        passes = True
+        missing_filters = []
+        if req_vals:
+            search_text = (
+                str(paper.get("title", "")) + " " + 
+                str(paper.get("original_abstract", "")) + " " + 
+                str(snip) + " " + 
+                str(ai_abs) + " " + 
+                " ".join([str(t) for t in tags]) # Ensure tags are strings
+            ).lower()
+            passes = any(v in search_text for v in req_vals)
+            if not passes: missing_filters = [v for v in req_vals]
 
-            if st.session_state.add_to_zotero_state and score >= z_thresh and passes:
-                status_msg = "SAVED"
-            else:
-                status_msg = "SKIPPED"
-                if score < z_thresh: skip_reason = f"AI Score {score} < {z_thresh}"
-                elif not passes: skip_reason = "Tag Filters Failed"
-
-        if status_msg == "SAVED":
-            full_zotero_abstract = f"== AI ANALYSIS & REPORT ==\n{ai_abs}\n\n== SOURCE ABSTRACT ==\n{snip}"
-            item = {
-                "itemType": "journalArticle",
-                "title": paper.get("title"),
-                "creators": parse_authors(paper.get("authors_info")),
-                "abstractNote": full_zotero_abstract[:ZOTERO_MAX_ABSTRACT_CHARS],
-                "date": str(paper.get("year") or ""), # Send date to Zotero
-                "tags": [{"tag": t[:MAX_TAG_LENGTH]} for t in tags],
-                "url": with_ntu_proxy(doi or paper.get("url")),
-                "DOI": doi
-            }
-            # PASS THE OVERRIDE COLLECTION ID
-            ok, msg = save_to_zotero_local(item, collection_id=target_collection)
-            if ok: 
-                saved += 1
-            else: 
-                st.error(f"Zotero Error: {msg}")
+        status_msg = "SKIPPED"
+        reason = ""
         
-        # --- UPDATE QUERY STATS FOR SPEEDUP LOGIC ---
-        if not is_dup and not vector_fail and not bypass_ai:
-            query_stats['processed'] += 1
-            if status_msg == "SAVED":
-                query_stats['saved'] += 1
+        # --- NEW LOGIC: SUBSTANCE FILTER ---
+        substance_rejected = False
+        if "none" in chemicals.lower() and "none" in plants.lower():
+            substance_rejected = True
             
-            # Check trigger
+        if is_dup:
+            status_msg = "DUPLICATE"
+        elif st.session_state.add_to_zotero_state and score >= z_thresh and passes:
+            if substance_rejected:
+                status_msg = "REJECTED"
+                reason = "No Substances/Plants Found (Filter)"
+            else:
+                # Sanitize tags: Ensure string type and truncate to limit
+                clean_tags = []
+                for t in tags:
+                    if isinstance(t, str):
+                        clean_tags.append({"tag": t[:MAX_TAG_LENGTH]})
+                    elif isinstance(t, tuple) and len(t) > 0:
+                        # Handle accidental tuple tags from semantic search
+                        clean_tags.append({"tag": str(t[0])[:MAX_TAG_LENGTH]})
+                
+                item = {
+                    "itemType": "journalArticle",
+                    "title": paper.get("title"),
+                    "creators": parse_authors(paper.get("authors_info")),
+                    "abstractNote": (paper.get("original_abstract") or snip)[:ZOTERO_MAX_ABSTRACT_CHARS],
+                    "date": str(paper.get("year") or ""),
+                    "tags": clean_tags,
+                    "url": with_ntu_proxy(doi or paper.get("url")),
+                    "DOI": doi
+                }
+                ok, msg = upload_to_zotero(item, target_coll_id=target_collection)
+                if ok: 
+                    saved += 1
+                    status_msg = "SAVED"
+                else: 
+                    st.error(f"Zotero Error: {msg}")
+        else:
+            if not passes: reason = f"Filters failed (Missing: {', '.join(missing_filters)})"
+            elif score < z_thresh: reason = "Score too low"
+        
+        # Speedup Stats
+        if not is_dup and not bypass_ai:
+            query_stats['processed'] += 1
+            if status_msg == "SAVED": query_stats['saved'] += 1
             if enable_speedup and query_stats['processed'] == 10:
                 if query_stats['saved'] >= speedup_threshold:
                     query_stats['bypass_ai'] = True
-                    st.success("⚡ Smart Speed-Up Triggered! Remaining papers in this query will be auto-saved.")
+                    st.success("⚡ Smart Speed-Up Triggered!")
 
-        end_time = time()
-        duration = end_time - start_time
-
-        # --- PACK DATA FOR HISTORY AND DISPLAY ---
+        duration = time() - start_time
+        
+        # Result Object
         result_entry = {
             'paper': paper,
             'score': score,
@@ -1486,25 +1903,13 @@ def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_
             'z_thresh': z_thresh,
             'passes': passes,
             'status_msg': status_msg,
-            'skip_reason': skip_reason,
             'process_time': duration,
-            # NEW METADATA
-            'query_used': query,
-            'model_used': actual_model_id,
-            'vec_min_used': vec_min,
-            'semantic_match_sentence': semantic_trigger_sentence,
-            'content_length': len(snip) + len(pdf_text) # Calculate Length for Display
+            'reason': reason
         }
         
-        # Append to session state history
         st.session_state.results_history.append(result_entry)
-        
-        # Display immediately
-        _display_paper_details(result_entry)
-        
+        _display_paper_details(result_entry, len(st.session_state.results_history))
         prog_ph.progress(int((idx / total_papers) * 100) if total_papers else 0)
-        
-        # UPDATE CYCLE STATE (FOR RESUME)
         st.session_state.cycle_state['paper_offset'] += 1
 
     return annotated, saved
@@ -1707,7 +2112,14 @@ m_keys = list(MODEL_OPTIONS.keys())
 # -------------------------------------------------------
 
 # 1. Primary Selectbox (Provider)
-selected_option = st.selectbox("🤖 Model", m_keys, index=0, key="model_key_selector")
+# RESTORE SAVED SELECTION
+saved_model_key = st.session_state.get("model_key_selector", m_keys[0])
+try:
+    default_idx = m_keys.index(saved_model_key)
+except ValueError:
+    default_idx = 0
+
+selected_option = st.selectbox("🤖 Model", m_keys, index=default_idx, key="model_key_selector")
 
 # 2. Check if user picked Ollama
 is_local_ollama = (MODEL_OPTIONS[selected_option]["model_id"] == "LOCAL_OLLAMA")
@@ -1717,7 +2129,14 @@ st.session_state.use_ollama = is_local_ollama
 if is_local_ollama:
     local_models = get_ollama_models()
     if local_models:
-        local_model_name = st.selectbox("💻 Select Local Ollama Model", local_models, key="ollama_local_model_selector")
+        # RESTORE SAVED OLLAMA SELECTION
+        saved_ollama = st.session_state.get("ollama_local_model_selector", "")
+        try:
+            ollama_idx = local_models.index(saved_ollama)
+        except ValueError:
+            ollama_idx = 0
+            
+        local_model_name = st.selectbox("💻 Select Local Ollama Model", local_models, index=ollama_idx, key="ollama_local_model_selector")
     else:
         st.error("Could not fetch models from Ollama (localhost:11434). Is it running?")
 # -------------------------------------------------------
@@ -1758,58 +2177,74 @@ def run_cycle_logic(queries):
     # Cycle Management from State
     start_q_idx = st.session_state.cycle_state['query_idx']
     
-    # Use Session Objects List directly so we can access row metadata
+    # Map the selected query strings back to their objects to get folders
     all_objs = st.session_state.automated_queries
+    # Create lookup (maps "query string" -> {object})
+    query_map = {obj['query']: obj for obj in all_objs}
     
-    # Iterate by Index to allow Resume
-    for q_idx in range(start_q_idx, len(all_objs)):
-        q_obj = all_objs[q_idx]
-        query_str = str(q_obj.get('query', '')).strip()
+    for q_idx in range(start_q_idx, len(queries)):
+        raw_item = queries[q_idx]
         
+        # --- ROBUSTNESS FIX: Handle Dict vs String input ---
+        if isinstance(raw_item, dict):
+            query_str = raw_item.get("query", "")
+            # --- LOGIC FIX: Extract Row-Specific Settings ---
+            row_vec_min = raw_item.get("vector_min", 0.50)
+            row_start = int(raw_item.get("start_rec", 0))
+            row_stop = int(raw_item.get("stop_rec", 12))
+            folder_override = raw_item.get("folder", "").strip()
+        else:
+            query_str = str(raw_item)
+            # Default Fallbacks if passing raw strings
+            row_vec_min = st.session_state.vector_score_min_slider
+            row_start = 0
+            row_stop = st.session_state.max_results_slider
+            folder_override = ""
+        # ---------------------------------------------------
+        
+        # Look up folder if not found in raw_item (for string-based flow)
+        if not folder_override and query_str in query_map:
+            folder_override = query_map[query_str].get('folder', "").strip()
+
+        # Update state for resume (Query Level)
         st.session_state.cycle_state['query_idx'] = q_idx
         
-        if not query_str:
-            status.warning(f"Skipping empty row {q_idx}")
-            continue
-        
         status.info(f"Processing: {query_str}")
-
-        # --- RETRIEVE ROW SPECIFICS ---
-        folder_override = str(q_obj.get('folder', "")).strip()
-        # Safely parse nums
-        try: vec_thresh = float(q_obj.get('vector_min', 0.50))
-        except: vec_thresh = 0.50
-        try: start_r = int(q_obj.get('start_rec', 0))
-        except: start_r = 0
-        try: stop_r = int(q_obj.get('stop_rec', 12))
-        except: stop_r = 12
         
-        limit_count = stop_r - start_r
-        if limit_count <= 0: limit_count = 10 # fallback
+        # --- SKIP EMPTY QUERIES ---
+        if not query_str or not query_str.strip():
+            st.warning(f"Skipping empty query at index {q_idx}")
+            continue
 
-        # --- CAPTURE MANIFEST DATA (New Rich Log Header) ---
-        separator_manifest = {
-            'is_separator': True, 
-            'query': query_str,
-            'timestamp': time(),
-            'config_file': st.session_state.get("current_config_file", "None"),
-            'model': actual_model_id,
-            'topics': st.session_state.topics_txt,
-            'semantic_sents': [s[0] for s in st.session_state.semantic_sentences if s[1]],
-            'vector_min': vec_thresh,
-            'start': start_r,
-            'stop': stop_r,
-            'collection': folder_override if folder_override else st.session_state.user_zotero_collection,
-            'targets': st.session_state.selected_tag_categories,
-            'filters': st.session_state.ai_tag_post_filter_values,
-            'use_bool': st.session_state.get("use_boolean_checkbox", False),
-            'speedup_active': st.session_state.enable_speedup_checkbox
-        }
+        # Initialize stats for this query cycle
+        query_stats = st.session_state.cycle_state.get('query_stats', {
+            'processed': 0, 'saved': 0, 'bypass_ai': False
+        })
+        
+        if folder_override:
+            st.caption(f"📂 Target Collection: {folder_override}")
+        
+        # Calculate Limits based on Table Row
+        total_limit = row_stop - row_start
+        if total_limit <= 0: total_limit = 5 # Safety fallback
+        
+        # Calculate Offset for API based on Resume State
+        # If we are resuming the SAME query (q_idx == start_q_idx), we add the paper_offset to the row's start.
+        resume_adder = st.session_state.cycle_state['paper_offset'] if q_idx == start_q_idx else 0
+        current_api_offset = row_start + resume_adder
+        
+        # If we are starting a NEW query, reset the paper_offset in state to 0
+        if q_idx != start_q_idx: 
+            st.session_state.cycle_state['paper_offset'] = 0
+            st.session_state.cycle_state['query_stats'] = {'processed': 0, 'saved': 0, 'bypass_ai': False}
+            query_stats = st.session_state.cycle_state['query_stats']
+            current_api_offset = row_start # No resume adder
 
-        # Print Visual Separator with Payload
-        st.session_state.results_history.append(separator_manifest)
-        # We manually call display here so it appears immediately
-        _display_paper_details(separator_manifest)
+        # Calculate remaining limit (Total limit - what we already processed)
+        remaining_limit = total_limit - resume_adder
+        if remaining_limit <= 0:
+            st.info(f"Skipping {query_str}: Range {row_start}-{row_stop} already processed.")
+            continue
 
         # 1. Prepare Query
         final_query = query_str
@@ -1818,33 +2253,48 @@ def run_cycle_logic(queries):
             final_query = res.get("boolean_query", query_str)
             st.info(f"Boolean Query: {final_query}")
 
-        # 2. Offset Logic
-        if q_idx == start_q_idx:
-            # If resuming mid-cycle, ensure we don't start BEFORE the user's start_rec
-            current_offset = max(st.session_state.cycle_state['paper_offset'], start_r)
-        else:
-            current_offset = start_r
-            # Reset state for fresh query
-            st.session_state.cycle_state['paper_offset'] = start_r
-            st.session_state.cycle_state['query_stats'] = {'processed': 0, 'saved': 0, 'bypass_ai': False}
-
-        query_stats = st.session_state.cycle_state.get('query_stats', {'processed': 0, 'saved': 0, 'bypass_ai': False})
-
+        # 2. Acquire
         if search_mode == "Keyword Search":
             source = st.session_state.search_source_selector
             if source in ["Semantic Scholar", "Both"]:
-                for chunk in search_semantic_scholar(final_query, limit_count, current_offset):
-                    a, s = process_chunk_and_save(chunk, final_query, 100, 0, status, prog, query_stats, vec_thresh, collection_override=folder_override)
-                    total_ann += a; total_save += s
-            if source in ["PubMed", "Both"]:
-                 p_res = search_pubmed_paged(final_query, limit_count, start_offset=current_offset)
-                 total_pubmed = len(p_res)
-                 pubmed_processed_count = 0
-                 for batch in _chunks(p_res, 50): 
+                # PASS ROW-SPECIFIC OFFSET and LIMIT
+                for chunk in search_semantic_scholar(final_query, remaining_limit, current_api_offset):
+                    # PASS vec_min_override
                     a, s = process_chunk_and_save(
-                        batch, final_query, total_pubmed, pubmed_processed_count, status, prog, query_stats, vec_thresh, collection_override=folder_override
+                        chunk, 
+                        final_query, 
+                        100, 
+                        0, 
+                        status, 
+                        prog, 
+                        query_stats, 
+                        collection_override=folder_override,
+                        vec_min_override=row_vec_min 
                     )
                     total_ann += a; total_save += s
+                    
+            if source in ["PubMed", "Both"]:
+                 p_res = search_pubmed_paged(final_query, remaining_limit, current_api_offset)
+                 
+                 # Chunk the results into batches of 50 for AI processing
+                 total_pubmed = len(p_res)
+                 pubmed_processed_count = 0
+
+                 for batch in _chunks(p_res, 50): 
+                    # PASS vec_min_override
+                    a, s = process_chunk_and_save(
+                        batch,
+                        final_query,
+                        total_pubmed, 
+                        pubmed_processed_count, 
+                        status,
+                        prog,
+                        query_stats,
+                        collection_override=folder_override,
+                        vec_min_override=row_vec_min 
+                    )
+                    total_ann += a
+                    total_save += s
                     pubmed_processed_count += len(batch)
 
         elif search_mode == "Paste citation / page text":
@@ -1858,13 +2308,33 @@ def run_cycle_logic(queries):
                     p = search_pubmed_paged(r["title"], 1)
                     if p: papers.append(p[0])
             if papers:
-                a, s = process_chunk_and_save(papers, final_query, len(papers), 0, status, prog, query_stats, vec_thresh, collection_override=folder_override)
+                a, s = process_chunk_and_save(
+                    papers, 
+                    final_query, 
+                    len(papers), 
+                    0, 
+                    status, 
+                    prog, 
+                    query_stats, 
+                    collection_override=folder_override,
+                    vec_min_override=row_vec_min
+                )
                 total_ann += a; total_save += s
 
         elif search_mode == "Lookup by URL / PDF":
             papers = search_by_url_doi_pdf(st.session_state.url_or_doi)
             if papers:
-                a, s = process_chunk_and_save(papers, final_query, len(papers), 0, status, prog, query_stats, vec_thresh, collection_override=folder_override)
+                a, s = process_chunk_and_save(
+                    papers, 
+                    final_query, 
+                    len(papers), 
+                    0, 
+                    status, 
+                    prog, 
+                    query_stats, 
+                    collection_override=folder_override,
+                    vec_min_override=row_vec_min
+                )
                 total_ann += a; total_save += s
 
     st.success(f"Run Complete. Annotated: {total_ann}, Saved: {total_save}")
@@ -1882,8 +2352,9 @@ st.subheader("📝 Results Log (Persists across runs)")
 
                                
 if st.session_state.results_history:
-    for item in st.session_state.results_history:
-        _display_paper_details(item)
+    # Use unique index key for correct display in history
+    for idx, item in enumerate(st.session_state.results_history):
+        _display_paper_details(item, f"history_{idx}")
 else:
     st.info("No results yet. Click Go to start.")
 
@@ -1950,6 +2421,7 @@ with c_clear:
         st.session_state.results_history = []
         st.session_state.search_cache = {} 
         st.rerun()
+
 
 # --- RUN LOGIC ---
 if start_run:
