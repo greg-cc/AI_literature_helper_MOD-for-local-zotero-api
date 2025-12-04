@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*- version 1.9
+# -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd  # Required for the Data Editor
 import requests, json, re, os, io, csv
@@ -53,10 +53,10 @@ if not os.path.exists(CONFIG_DIR): os.makedirs(CONFIG_DIR)
 
 # --- API KEYS ---
 # NOTE: In production, these should be environment variables or user inputs.
-SEMANTIC_SCHOLAR_API_KEY = ""
-GEMINI_API_KEY = ""
-NCBI_EMAIL = "@gmail.com"
-NCBI_API_KEY = ""
+SEMANTIC_SCHOLAR_API_KEY = "It2pKMHpTK7l5lnOhPUKE4ldBA3Lzeq82hHEsbnB"
+GEMINI_API_KEY = "AIzaSyDFlxX_6iRUmSX8A3bvQDyChf8Fdl9EKZA"
+NCBI_EMAIL = "reggcrowmell@gmail.com"
+NCBI_API_KEY = "89fb3103db9bd0586c75a45d0c6a65618108"
 
 # --- GEMINI CLIENT SETUP ---
 try:
@@ -2304,61 +2304,48 @@ if search_mode == "Keyword Search":
         # Row 1: Vector & Reset
         gc1, gc2, gc_reset = st.columns([2, 1, 1])
         with gc1:
-            vec_adjust = st.number_input("Global Vector Adjust (+/-)", value=0.00, step=0.01, format="%.2f", key="global_vec_adj")
+            vec_adjust = st.number_input("Global Vector Adjust (+/-)", value=0.00, step=0.01, format="%.2f", key="global_vec_adj_unique_v2")
         with gc2:
-            if st.button("Apply Vec"):
+            if st.button("Apply Vec", key="btn_apply_vec"):
                 # Apply diff to all rows
                 for q in st.session_state.automated_queries:
-                    current_val = float(q.get('vector_min', 0.50))
-                    new_val = max(0.0, min(1.0, current_val + vec_adjust))
-                    q['vector_min'] = float(f"{new_val:.2f}")
+                    try:
+                        current_val = float(q.get('vector_min', 0.50))
+                        new_val = current_val + vec_adjust
+                        new_val = max(0.0, min(6.0, new_val))
+                        q['vector_min'] = float(f"{new_val:.2f}")
+                    except ValueError:
+                        pass 
                 st.rerun()
+                
         with gc_reset:
-            if st.button("Reset Defaults"):
+            if st.button("Reset Defaults", key="btn_reset_defaults"):
                 for q in st.session_state.automated_queries:
                     q['vector_min'] = 0.50
                     q['start_rec'] = 0
-                    q['stop_rec'] = 12 # RESET DEFAULT 12
+                    q['stop_rec'] = 12 
+                    q['fail_fast_triggered'] = False # Reset flags
                 st.rerun()
 
-        # Row 2: Global Range Settings (NEW)
+        # Row 2: Global Range Settings
         gr1, gr2, gr3 = st.columns([1, 1, 2])
         with gr1:
-            g_start = st.number_input("Set All Start #", min_value=0, step=10, key="glob_start_in")
+            g_start = st.number_input("Set All Start #", min_value=0, step=10, key="glob_start_in_unique_v2")
         with gr2:
-            g_stop = st.number_input("Set All Stop #", min_value=1, value=12, step=10, key="glob_stop_in")
+            g_stop = st.number_input("Set All Stop #", min_value=1, value=12, step=10, key="glob_stop_in_unique_v2")
         with gr3:
-            if st.button("Apply Range to All"):
+            if st.button("Apply Range to All", key="btn_apply_range"):
                 for q in st.session_state.automated_queries:
                     q['start_rec'] = int(g_start)
                     q['stop_rec'] = int(g_stop)
                 st.rerun()
         
-# Data Editor Setup
-        current_data = pd.DataFrame(st.session_state.automated_queries)
+        # Data Editor Setup
+        df_list = st.session_state.automated_queries
+        current_data = pd.DataFrame(df_list)
         
         if not current_data.empty:
-            # Ensure proper types for display
-            if 'vector_min' in current_data.columns:
-                current_data['vector_min'] = current_data['vector_min'].astype(float)
-            if 'start_rec' in current_data.columns:
-                current_data['start_rec'] = current_data['start_rec'].astype(int)
-            if 'stop_rec' in current_data.columns:
-                current_data['stop_rec'] = current_data['stop_rec'].astype(int)
-        
-        if "Select" not in current_data.columns:
-            current_data.insert(0, "Select", False)
-            
-        # --- NEW: Add Semantic Sentence Column ---
-        if "semantic_sentence" not in current_data.columns:
-            current_data.insert(len(current_data.columns), "semantic_sentence", "")
-        # ----------------------------------------
-
-# Data Editor Setup
-        current_data = pd.DataFrame(st.session_state.automated_queries)
-        
-        if not current_data.empty:
-            # Ensure proper types for display
+            # Ensure types
             if 'vector_min' in current_data.columns:
                 current_data['vector_min'] = current_data['vector_min'].astype(float)
             if 'start_rec' in current_data.columns:
@@ -2367,16 +2354,28 @@ if search_mode == "Keyword Search":
                 current_data['stop_rec'] = current_data['stop_rec'].astype(int)
             if 'semantic_threshold' in current_data.columns:
                 current_data['semantic_threshold'] = current_data['semantic_threshold'].astype(float)
-        
+
         if "Select" not in current_data.columns:
             current_data.insert(0, "Select", False)
             
-        # --- NEW: Add Semantic Sentence Column ---
         if "semantic_sentence" not in current_data.columns:
             current_data.insert(len(current_data.columns), "semantic_sentence", "")
-        # ----------------------------------------
+
+        # --- VISUALIZE FAIL FAST STATUS ---
+        if "fail_fast_triggered" not in current_data.columns:
+            current_data["fail_fast_triggered"] = False
+        
+        # Create a visual indicator column
+        current_data["Status"] = current_data["fail_fast_triggered"].apply(lambda x: "🛑 LOW YIELD" if x else "✅ Ready")
+        # ---------------------------------------
 
         st.caption("📋 **Query Execution Queue** (Editable)")
+        
+        # Reorder columns to put Status near the front
+        cols = ['Select', 'Status', 'query', 'folder', 'semantic_sentence', 'semantic_threshold', 'vector_min', 'start_rec', 'stop_rec']
+        cols = [c for c in cols if c in current_data.columns]
+        current_data = current_data[cols]
+
         edited_df = st.data_editor(
             current_data,
             num_rows="dynamic",
@@ -2385,21 +2384,13 @@ if search_mode == "Keyword Search":
             key="query_table_editor",
             column_config={
                 "Select": st.column_config.CheckboxColumn(width="small"),
+                "Status": st.column_config.TextColumn("Run Status", disabled=True, width="small", help="🛑 indicates the query was aborted due to Low Yield (Fail Fast). Increase Vector Min!"),
                 "query": st.column_config.TextColumn("Query String", required=True, width="large"),
                 "folder": st.column_config.TextColumn("Collection ID", width="small", help="Optional Zotero Key"),
                 "semantic_sentence": st.column_config.TextColumn("Semantic Sentence (Per Query)", width="medium"), 
-                
-                # --- THIS IS THE NEW SLIDER FOR THE COMPOSITE SUM ---
                 "semantic_threshold": st.column_config.NumberColumn(
-                    "Composite Min", 
-                    min_value=0.0, 
-                    max_value=6.0, 
-                    step=0.01, 
-                    format="%.2f",
-                    help="Min Sum of (Top3 Net + Top3 Raw) to qualify."
+                    "Composite Min", min_value=0.0, max_value=6.0, step=0.01, format="%.2f"
                 ), 
-                # --------------------------------------------------
-                
                 "vector_min": st.column_config.NumberColumn("Vec Min", min_value=0.0, max_value=6.0, step=0.01, format="%.2f"),
                 "start_rec": st.column_config.NumberColumn("Start #", min_value=0, step=10),
                 "stop_rec": st.column_config.NumberColumn("Stop #", min_value=1, step=10)
@@ -2409,10 +2400,16 @@ if search_mode == "Keyword Search":
         
         # Sync Logic
         records = edited_df.to_dict('records')
-        valid_records = [r for r in records if r.get('query') and str(r.get('query')).strip()]
-        
+        valid_records = []
+        for r in records:
+            if r.get('query') and str(r.get('query')).strip():
+                # Clean out UI-only columns before saving to session state
+                clean_r = {k:v for k,v in r.items() if k not in ['Select', 'Status']}
+                # Ensure the hidden flag is preserved from the Status column logic
+                clean_r['fail_fast_triggered'] = (r.get('Status') == "🛑 LOW YIELD")
+                valid_records.append(clean_r)
+            
         # Check if we need to update session state
-        # Create comparable lists (removing Select key for comparison)
         def clean_rec(rec_list):
             return [{k:v for k,v in r.items() if k != 'Select'} for r in rec_list]
             
@@ -2425,7 +2422,7 @@ if search_mode == "Keyword Search":
             selected_rows = edited_df[edited_df.Select == True]
             if not selected_rows.empty:
                 # Keep only unselected
-                remaining = edited_df[edited_df.Select == False].drop(columns=['Select']).to_dict('records')
+                remaining = edited_df[edited_df.Select == False].drop(columns=['Select', 'Status'], errors='ignore').to_dict('records')
                 st.session_state.automated_queries = remaining
                 st.rerun()
 
@@ -2548,6 +2545,7 @@ def run_cycle_logic(queries):
     total_ann = 0
     total_save = 0
     
+    # --- RESOLVE MODEL ID (GEMINI vs OLLAMA) ---
     if st.session_state.get("use_ollama"):
         actual_model_id = st.session_state.get("ollama_local_model_selector", "llama3")
     else:
@@ -2561,11 +2559,8 @@ def run_cycle_logic(queries):
     for q_idx in range(start_q_idx, len(queries)):
         raw_item = queries[q_idx]
         
-        # --- LOGIC CORRECTION ---
-        # Whether it comes from the Automated Table (dict) or the Single Query construction (dict),
-        # we must read the keys consistently.
-        
         if isinstance(raw_item, dict):
+            # --- AUTOMATED CYCLE MODE ---
             query_str = raw_item.get("query", "")
             
             # 1. Vector Min: Look for 'vector_min'. If missing, fallback to global slider.
@@ -2587,7 +2582,7 @@ def run_cycle_logic(queries):
             folder_override = raw_item.get("folder", "").strip()
             
         else:
-            # Fallback for non-dict items (Manual Mode / Paste Text / URL)
+            # --- MANUAL / SINGLE QUERY MODE ---
             query_str = str(raw_item)
             row_vec_min = st.session_state.vector_score_min_slider
             row_composite_min = st.session_state.get("composite_score_min_slider", 0.0)
@@ -2606,6 +2601,7 @@ def run_cycle_logic(queries):
             st.warning(f"Skipping empty query at index {q_idx}")
             continue
 
+        # Initialize stats and ABORT FLAG
         query_stats = st.session_state.cycle_state.get('query_stats', {
             'processed': 0, 'saved': 0, 'bypass_ai': False, 'abort': False
         })
@@ -2620,6 +2616,7 @@ def run_cycle_logic(queries):
         
         if q_idx != start_q_idx: 
             st.session_state.cycle_state['paper_offset'] = 0
+            # Reset stats (including abort flag) for new query
             st.session_state.cycle_state['query_stats'] = {'processed': 0, 'saved': 0, 'bypass_ai': False, 'abort': False}
             query_stats = st.session_state.cycle_state['query_stats']
             current_api_offset = row_start
@@ -2639,6 +2636,7 @@ def run_cycle_logic(queries):
         if search_mode == "Keyword Search":
             source = st.session_state.search_source_selector
             
+            # --- SEMANTIC SCHOLAR LOOP ---
             if source in ["Semantic Scholar", "Both"]:
                 for chunk in search_semantic_scholar(final_query, remaining_limit, current_api_offset):
                     if query_stats.get('abort'): break
@@ -2651,10 +2649,16 @@ def run_cycle_logic(queries):
                     )
                     total_ann += a; total_save += s
                     
+                    # --- FAIL FAST TRIGGER CHECK ---
                     if query_stats.get('abort'): 
-                        st.info("⏭️ Moving to next query (Fail Fast triggered).")
+                        st.warning(f"🛑 Fail Fast Triggered for '{query_str}'. Marking as failed.")
+                        # Mark the query in session state so the UI turns red
+                        if q_idx < len(st.session_state.automated_queries):
+                            st.session_state.automated_queries[q_idx]['fail_fast_triggered'] = True
+                        st.info("⏭️ Moving to next query.")
                         break
             
+            # --- PUBMED LOOP ---    
             if source in ["PubMed", "Both"] and not query_stats.get('abort'):
                  p_res = search_pubmed_paged(final_query, remaining_limit, current_api_offset)
                  total_pubmed = len(p_res)
@@ -2672,8 +2676,13 @@ def run_cycle_logic(queries):
                     total_ann += a; total_save += s
                     pubmed_processed_count += len(batch)
                     
+                    # --- FAIL FAST TRIGGER CHECK ---
                     if query_stats.get('abort'): 
-                        st.info("⏭️ Moving to next query (Fail Fast triggered).")
+                        st.warning(f"🛑 Fail Fast Triggered for '{query_str}'. Marking as failed.")
+                        # Mark the query in session state so the UI turns red
+                        if q_idx < len(st.session_state.automated_queries):
+                            st.session_state.automated_queries[q_idx]['fail_fast_triggered'] = True
+                        st.info("⏭️ Moving to next query.")
                         break
 
         elif search_mode == "Paste citation / page text":
@@ -2723,8 +2732,8 @@ def run_cycle_logic(queries):
     st.session_state.cycle_state = {
         "active": False, "query_idx": 0, "paper_offset": 0,
         "query_stats": {'processed': 0, 'saved': 0, 'bypass_ai': False, 'abort': False}
-    }	 
-																	 
+    }
+															 
 
 # --- RESULTS AREA ---
 st.markdown("---")
