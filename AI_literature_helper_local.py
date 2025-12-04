@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*- version 1.7 WORKING - valid data passed to zotera.
+# -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd  # Required for the Data Editor
 import requests, json, re, os, io, csv
@@ -53,10 +53,10 @@ if not os.path.exists(CONFIG_DIR): os.makedirs(CONFIG_DIR)
 
 # --- API KEYS ---
 # NOTE: In production, these should be environment variables or user inputs.
-SEMANTIC_SCHOLAR_API_KEY = "It2pKMHpTK7l5lnOhPUKE4ldBA3Lzeq82hHEsbnB"
-GEMINI_API_KEY = "AIzaSyDFlxX_6iRUmSX8A3bvQDyChf8Fdl9EKZA"
-NCBI_EMAIL = "reggcrowmell@gmail.com"
-NCBI_API_KEY = "89fb3103db9bd0586c75a45d0c6a65618108"
+SEMANTIC_SCHOLAR_API_KEY = ""
+GEMINI_API_KEY = ""
+NCBI_EMAIL = "@gmail.com"
+NCBI_API_KEY = ""
 
 # --- GEMINI CLIENT SETUP ---
 try:
@@ -190,35 +190,45 @@ def save_full_state(filename):
     
     # Snapshot Session State
     state_dump = {
-        "ver": "2.2",
-        # Text Fields
+        "ver": "2.4",
+												 
+        "cycle_state": st.session_state.get("cycle_state", {
+            "active": False,
+            "query_idx": 0,
+            "paper_offset": 0,
+            "query_stats": {'processed': 0, 'saved': 0, 'bypass_ai': False}
+        }),
+		
+							 
         "topics_txt": st.session_state.get("topics_txt", ""),
         "authors_txt": st.session_state.get("authors_txt", ""),
         "user_zotero_id": st.session_state.get("user_zotero_id", ""),
         "user_zotero_collection": st.session_state.get("user_zotero_collection", ""),
         "zotero_api_key": st.session_state.get("zotero_api_key", ""),
-        
-        # Booleans
+		
+						  
         "allow_duplicates": st.session_state.get("allow_duplicates", False),
         "add_to_zotero_state": st.session_state.get("add_to_zotero_state", True),
         "enable_speedup_checkbox": st.session_state.get("enable_speedup_checkbox", False),
         "use_boolean_checkbox": st.session_state.get("use_boolean_checkbox", False),
-        
-        # Sliders/Numbers (Globals)
+        "skip_low_yield_checkbox": st.session_state.get("skip_low_yield_checkbox", False),
+		
+								   
         "abstract_length_slider": st.session_state.get("abstract_length_slider", 150),
         "min_score3_slider": st.session_state.get("min_score3_slider", 2),
         "speedup_threshold_slider": st.session_state.get("speedup_threshold_slider", 9),
-        # Note: Vector min is now primarily per-query, but we save global for backup
-        
-        # Lists / Complex
+        "vector_score_min_slider": st.session_state.get("vector_score_min_slider", 1.50),
+        "max_results_slider": st.session_state.get("max_results_slider", 20),
+		
+								 
         "semantic_sentences": st.session_state.get("semantic_sentences", DEFAULT_SEMANTIC_SENTENCES),
         "ai_tag_categories_list": st.session_state.get("ai_tag_categories_list", DEFAULT_AI_TAG_CATEGORIES),
         "ai_tag_post_filter_values": st.session_state.get("ai_tag_post_filter_values", []),
-        
-        # THE CORE: Detailed Queries Table (List of Dicts)
+		
+									   
         "automated_queries": st.session_state.get("automated_queries", []),
-        
-        # Model Selections
+		
+						   
         "model_key_selector": st.session_state.get("model_key_selector", ""),
         "ollama_local_model_selector": st.session_state.get("ollama_local_model_selector", ""),
         "search_mode_selector": st.session_state.get("search_mode_selector", "Keyword Search"),
@@ -244,6 +254,30 @@ def load_full_state(filename):
         data = json.load(open(path))
         for k, v in data.items():
             if k in ["ver"]: continue
+			
+																   
+            if k == "cycle_state" and isinstance(v, dict):
+                st.session_state.cycle_state = v
+																						   
+                st.session_state.cycle_state['active'] = False 
+            else:
+                st.session_state[k] = v
+        
+													   
+        st.session_state.current_config_file = filename
+            
+        st.toast(f"♻️ Loaded: {filename}")
+															  
+    except Exception as e:
+        st.error(f"Load failed: {e}")
+        """Restores the full GUI state."""
+    path = os.path.join(CONFIG_DIR, filename)
+    if not os.path.exists(path): return
+    
+    try:
+        data = json.load(open(path))
+        for k, v in data.items():
+            if k in ["ver"]: continue
             st.session_state[k] = v
         
         # Capture the file loaded for the Report Header
@@ -252,7 +286,7 @@ def load_full_state(filename):
         st.toast(f"♻️ Loaded: {filename}")
         # Note: Callback handles refresh, no rerun needed here
     except Exception as e:
-        st.error(f"Load failed: {e}")
+        st.error(f"Load failed: {e}")							  
 
 # ============================
 # PREFERENCES (LEGACY LOADER)
@@ -274,23 +308,23 @@ def load_prefs():
         "library_id": "18781930",
         "allow_duplicates": False,
         "automated_queries": [
-            {"query": "Lyme ALKALOIDS", "folder": ""}, {"query": "Lyme coumarins", "folder": ""}, 
-            {"query": "Lyme dose-dependent", "folder": ""}, {"query": "Lyme flavonoids", "folder": ""}, 
-            {"query": "Lyme Glucosinolates", "folder": ""}, {"query": "Lyme \"Molecular docking\"", "folder": ""}, 
-            {"query": "Lyme Organosulfur", "folder": ""}, {"query": "Lyme phenolic acids", "folder": ""}, 
-            {"query": "Lyme phytochemicals", "folder": ""}, {"query": "Lyme Phytonutrient", "folder": ""}, 
-            {"query": "Lyme Phytosterols", "folder": ""}, {"query": "Lyme \"plant extracts\"", "folder": ""}, 
-            {"query": "Lyme Plant-Derived", "folder": ""}, {"query": "Lyme polyphenols", "folder": ""}, 
-            {"query": "Lyme Saponins", "folder": ""}, {"query": "Lyme stilbenes", "folder": ""}, 
-            {"query": "Lyme TCM", "folder": ""}, {"query": "Lyme Terpenes", "folder": ""}, 
-            {"query": "Lyme Terpenoids", "folder": ""}, {"query": "Lyme Carotenoids", "folder": ""}
+            {"query": "Lyme ALKALOIDS", "folder": "", "semantic_sentence": "", "semantic_threshold": 0.45}, {"query": "Lyme coumarins", "folder": "", "semantic_sentence": "", "semantic_threshold": 0.45}, 
+            {"query": "Lyme dose-dependent", "folder": "", "semantic_sentence": "", "semantic_threshold": 0.45}, {"query": "Lyme flavonoids", "folder": "", "semantic_sentence": "", "semantic_threshold": 0.45}, 
+            {"query": "Lyme Glucosinolates", "folder": "", "semantic_sentence": "", "semantic_threshold": 0.45}, {"query": "Lyme \"Molecular docking\"", "folder": "", "semantic_sentence": "", "semantic_threshold": 0.45}, 
+            {"query": "Lyme Organosulfur", "folder": "", "semantic_sentence": "", "semantic_threshold": 0.45}, {"query": "Lyme phenolic acids", "folder": "", "semantic_sentence": "", "semantic_threshold": 0.45}, 
+            {"query": "Lyme phytochemicals", "folder": "", "semantic_sentence": "", "semantic_threshold": 0.45}, {"query": "Lyme Phytonutrient", "folder": "", "semantic_sentence": "", "semantic_threshold": 0.45}, 
+            {"query": "Lyme Phytosterols", "folder": "", "semantic_sentence": "", "semantic_threshold": 0.45}, {"query": "Lyme \"plant extracts\"", "folder": "", "semantic_sentence": "", "semantic_threshold": 0.45}, 
+            {"query": "Lyme Plant-Derived", "folder": "", "semantic_sentence": "", "semantic_threshold": 0.45}, {"query": "Lyme polyphenols", "folder": "", "semantic_sentence": "", "semantic_threshold": 0.45}, 
+            {"query": "Lyme Saponins", "folder": "", "semantic_sentence": "", "semantic_threshold": 0.45}, {"query": "Lyme stilbenes", "folder": "", "semantic_sentence": "", "semantic_threshold": 0.45}, 
+            {"query": "Lyme TCM", "folder": "", "semantic_sentence": "", "semantic_threshold": 0.45}, {"query": "Lyme Terpenes", "folder": "", "semantic_sentence": "", "semantic_threshold": 0.45}, 
+            {"query": "Lyme Terpenoids", "folder": "", "semantic_sentence": "", "semantic_threshold": 0.45}, {"query": "Lyme Carotenoids", "folder": "", "semantic_sentence": "", "semantic_threshold": 0.45}      
         ],
         "ai_tag_categories_list": DEFAULT_AI_TAG_CATEGORIES,
         "semantic_sentences": DEFAULT_SEMANTIC_SENTENCES,
         "max_results_value": 1000, 
         "min_score3_value": 2, 
         "min_abstract_length_chars": 68, 
-        "vector_score_min_value": 0.35, 
+        "vector_score_min_value": 1.50, 
         "model_key_selector": "models/gemini-2.0-flash-lite-preview-02-05",
         "search_source_selector": "Semantic Scholar",
         "query_mode_selector": "Automated Cycle",
@@ -298,7 +332,8 @@ def load_prefs():
         "zotero_api_key_value": "",
         "ai_tag_post_filter_values": [],
         "enable_speedup_value": True,
-        "speedup_threshold_value": 7
+        "speedup_threshold_value": 7,
+        "skip_low_yield_value": False
     }
     if not os.path.exists(PREFS_FILE):
         return default_prefs
@@ -316,6 +351,7 @@ def save_prefs(data):
         logging.error(f"Failed to save preferences: {e}")
 
 # --- FIX: Define save_current_settings to resolve NameError ---
+
 def save_current_settings():
     """Collects all relevant session state variables and saves them via save_prefs."""
     # Get current Ollama selection if available
@@ -330,27 +366,29 @@ def save_current_settings():
         "semantic_sentences": st.session_state.get("semantic_sentences", DEFAULT_SEMANTIC_SENTENCES),
         "min_abstract_length_chars": st.session_state.get("abstract_length_slider", 150),
         "ai_tag_categories_list": st.session_state.get("ai_tag_categories_list", DEFAULT_AI_TAG_CATEGORIES),
-        "automated_queries": st.session_state.get("automated_queries", []),
+        "automated_queries": [
+            {**q, 'semantic_sentence': q.get('semantic_sentence', "")} 
+            for q in st.session_state.get("automated_queries", [])
+        ],
         "max_results_value": st.session_state.get("max_results_slider", 20),
         "min_score3_value": st.session_state.get("min_score3_slider", 2),
-        
-        # --- SAVING MODEL SELECTIONS ---
         "selected_model_key": st.session_state.get("model_key_selector", "models/gemini-2.0-flash-lite-preview-02-05"), 
         "selected_ollama_model": ollama_sel,
-        # -------------------------------
-        
         "search_source_selector": st.session_state.get("search_source_selector", "Semantic Scholar"),
         "search_mode_value": st.session_state.get("search_mode_selector", "Keyword Search"),
-        "vector_score_min_value": st.session_state.get("vector_score_min_slider", 0.50),
+        "vector_score_min_value": st.session_state.get("vector_score_min_slider", 1.50),
+        "composite_score_min_value": st.session_state.get("composite_score_min_slider", 0.0),
         "query_mode_value": st.session_state.get("query_mode_selector", "Single Query"),
         "add_to_zotero_state_value": st.session_state.get("add_to_zotero_state", True),
         "zotero_api_key_value": st.session_state.get("zotero_api_key", ""),
         "ai_tag_post_filter_values": st.session_state.get("ai_tag_post_filter_values", []),
         "enable_speedup_value": st.session_state.get("enable_speedup_checkbox", False),
-        "speedup_threshold_value": st.session_state.get("speedup_threshold_slider", 9)
+        "speedup_threshold_value": st.session_state.get("speedup_threshold_slider", 9),
+        "skip_low_yield_value": st.session_state.get("skip_low_yield_checkbox", False)
     }
     save_prefs(new_prefs)
     st.toast("✅ Settings saved.")
+
 # -----------------------------------------------------------
 
 
@@ -385,10 +423,11 @@ for q in st.session_state.automated_queries:
         if "vector_min" not in q: q["vector_min"] = 0.50
         if "start_rec" not in q: q["start_rec"] = 0
         if "stop_rec" not in q: q["stop_rec"] = 12 # Default 12
+        if "semantic_sentence" not in q: q["semantic_sentence"] = "" # <--- NEW KEY MIGRATION
         migrated_queries.append(q)
     elif isinstance(q, str):
         migrated_queries.append({
-            "query": q, "folder": "", 
+            "query": q, "folder": "", "semantic_sentence": "",
             "vector_min": 0.50, "start_rec": 0, "stop_rec": 12 # Default 12
         })
 st.session_state.automated_queries = migrated_queries
@@ -895,6 +934,36 @@ def upload_to_zotero(payload_dict: Dict[str, Any], target_coll_id: str = None) -
     final_payload = {"items": [payload_dict]}
     
     if target_coll_id:
+        final_payload["collectionId"] = target_coll_id 
+
+    # 10 Minute Budget (600 seconds)
+    start_time = time()
+    MAX_WAIT = 600
+    
+    while (time() - start_time) < MAX_WAIT:
+        try:
+            # Brief pause to let Zotero breathe between requests
+            sleep(0.5)
+            
+            z_resp = requests.post(connector_endpoint, json=final_payload, timeout=60)
+            z_resp.raise_for_status()
+            return True, "Item sent to Zotero."
+            
+        except Exception as e:
+            # If Zotero is busy (common during sync), wait and retry
+            # Logging this would show up in console, but we keep it silent to UI until timeout
+            sleep(5) # Wait 5 seconds before retrying
+            last_error = str(e)
+
+    return False, f"Zotero Timeout (10m): {last_error}"
+    """
+    Posts record to local Zotero Connector.
+    Includes a 10-minute retry loop to handle Zotero syncing/busy states.
+    """
+    connector_endpoint = "http://127.0.0.1:23119/connector/saveItems"
+    final_payload = {"items": [payload_dict]}
+    
+    if target_coll_id:
 					 
         final_payload["collectionId"] = target_coll_id 
 
@@ -1020,10 +1089,268 @@ def cosine_similarity(v1, v2):
     norm1, norm2 = np.linalg.norm(v1), np.linalg.norm(v2)
     return 0.0 if norm1 == 0 or norm2 == 0 else dot / (norm1 * norm2)
 
-def generate_semantic_tags(abstract_text: str, semantic_sentences: List[tuple], semantic_model, top_n: int = 1):
+@st.dialog("Search Vector Inspection")
+def show_vector_inspection(query_text, default_min):
     """
-    Generates tags based on semantic similarity.
-    Returns a list of tuples: (TagString, OriginalSentenceString)
+    Modal dialog to test how a specific text scores against the query
+    using the loaded embedding model.
+    """
+    st.caption(f"Inspecting Query: **{query_text}**")
+    
+    # Test Input
+    st.markdown("### 🧪 Test Similarity")
+    st.caption("Paste a sample abstract below to see if it meets your Threshold.")
+    
+    col_input, col_score = st.columns([3, 1])
+    
+    test_text = col_input.text_area("Sample Abstract / Text", height=200, 
+                                  placeholder="Paste text here to calculate vector score...")
+    
+    if test_text:
+        # Calculate Vector
+        model = get_embedding_model()
+        if model:
+            q_vec = get_embedding(query_text)
+            d_vec = get_embedding(test_text)
+            score = cosine_similarity(q_vec, d_vec)
+            
+            col_score.metric("Vector Score", f"{score:.4f}")
+            
+            if score >= default_min:
+                col_score.success(f"PASS\n(>= {default_min})")
+            else:
+                col_score.error(f"FAIL\n(< {default_min})")
+        else:
+            col_score.error("Model Error")
+
+@st.dialog("📊 Vector Tuning Report")
+def run_vector_tuning_report():
+    """
+    Runs a rapid 'Zero-Shot' vector search using the EXACT ranges defined 
+    in the query settings (Start/Stop) to help tune the minimum score threshold.
+    The report now shows Overall Vector Score, Semantic Net Scores, and the new 
+    COMPOSITE SCORE (Sum of Top 3 Net + Top 3 Raw).
+    """
+    st.caption("Running semantic comparison on defined range (No AI Analysis / No Saving)...")
+    
+    # 1. Gather Queries with Range Data
+    qs = []
+    if st.session_state.search_mode_selector == "Keyword Search" and st.session_state.query_mode_selector == "Single Query":
+         if st.session_state.user_prompt_input.strip():
+             max_r = st.session_state.get('max_results_slider', 20)
+             qs = [{
+                 'query': st.session_state.user_prompt_input,
+                 'vector_min': st.session_state.vector_score_min_slider,
+                 'start_rec': 0,
+                 'stop_rec': max_r
+             }]
+    elif st.session_state.search_mode_selector == "Keyword Search":
+        qs = st.session_state.automated_queries
+
+    if not qs:
+        st.error("No queries defined or selected.")
+        return
+
+    # 2. Setup
+    model = get_embedding_model()
+    if not model: 
+        st.error("Embedding model not loaded.")
+        return
+
+    all_results_grouped = {} # Store results in a dictionary grouped by query
+    prog_bar = st.progress(0)
+    status_text = st.empty()
+    
+    # 3. Execution Loop
+    for i, q_obj in enumerate(qs):
+        query_str = q_obj.get('query')
+        if not query_str: continue
+        
+        # --- EXTRACT EXACT RANGE ---
+        try:
+            start_rec = int(q_obj.get('start_rec', 0))
+            stop_rec = int(q_obj.get('stop_rec', 20))
+            limit = stop_rec - start_rec
+            if limit <= 0: limit = 20 # Fallback safety
+        except:
+            start_rec = 0
+            limit = 20
+            
+        status_text.text(f"Scanning: {query_str} (Recs {start_rec}-{stop_rec})...")
+        source = st.session_state.search_source_selector
+        
+        current_query_results = []
+
+        # -- Semantic Scholar --
+        if source in ["Semantic Scholar", "Both"]:
+            for chunk in search_semantic_scholar(query_str, limit, start_rec):
+                if chunk:
+                    ranked = prerank_papers(chunk, query_str, model)
+                    for p in ranked:
+                        # Calculate Semantic Scores (Top 3, returning Net Score, Raw Score, Tag)
+                        sem_tags_raw = generate_semantic_tags(p.get('snippet', ''), st.session_state.semantic_sentences, model, top_n=3)
+                        
+                        # Extract Net Scores (Index 0) and Raw Scores (Index 1)
+                        s1_net = sem_tags_raw[0][0] if len(sem_tags_raw) > 0 else 0.0
+                        s1_raw = sem_tags_raw[0][1] if len(sem_tags_raw) > 0 else 0.0
+                        
+                        s2_net = sem_tags_raw[1][0] if len(sem_tags_raw) > 1 else 0.0
+                        s2_raw = sem_tags_raw[1][1] if len(sem_tags_raw) > 1 else 0.0
+                        
+                        s3_net = sem_tags_raw[2][0] if len(sem_tags_raw) > 2 else 0.0
+                        s3_raw = sem_tags_raw[2][1] if len(sem_tags_raw) > 2 else 0.0
+                        
+                        # --- NEW: Calculate Composite Score ---
+                        composite_score = (s1_net + s2_net + s3_net) + (s1_raw + s2_raw + s3_raw)
+                        # --------------------------------------
+                        
+                        p['Sem_Top1_Tag'] = sem_tags_raw[0][2] if len(sem_tags_raw) > 0 else "N/A"
+
+                        current_query_results.append({
+                            "Score": p.get('vector_score', 0),
+                            "Composite_Score": composite_score, # <-- NEW COLUMN
+                            "Sem_Top1_Score_Net": s1_net,
+                            "Sem_Top1_Raw": s1_raw,
+                            "Sem_Top2_Score_Net": s2_net,
+                            "Sem_Top2_Raw": s2_raw,
+                            "Sem_Top3_Score_Net": s3_net,
+                            "Sem_Top3_Raw": s3_raw,
+                            "Title": p.get('title', "Untitled"),
+                            "Abstract": p.get('snippet', 'N/A'),
+                            "Source": "S2",
+                            "Query": query_str,
+                        })
+        
+        # -- PubMed --
+        if source in ["PubMed", "Both"]:
+            chunk = search_pubmed_paged(query_str, limit, start_rec)
+            if chunk:
+                 ranked = prerank_papers(chunk, query_str, model)
+                 for p in ranked:
+                    # Calculate Semantic Scores (Top 3, returning Net Score, Raw Score, Tag)
+                    sem_tags_raw = generate_semantic_tags(p.get('snippet', ''), st.session_state.semantic_sentences, model, top_n=3)
+                    
+                    s1_net = sem_tags_raw[0][0] if len(sem_tags_raw) > 0 else 0.0
+                    s1_raw = sem_tags_raw[0][1] if len(sem_tags_raw) > 0 else 0.0
+                    
+                    s2_net = sem_tags_raw[1][0] if len(sem_tags_raw) > 1 else 0.0
+                    s2_raw = sem_tags_raw[1][1] if len(sem_tags_raw) > 1 else 0.0
+                    
+                    s3_net = sem_tags_raw[2][0] if len(sem_tags_raw) > 2 else 0.0
+                    s3_raw = sem_tags_raw[2][1] if len(sem_tags_raw) > 2 else 0.0
+                    
+                    # --- NEW: Calculate Composite Score ---
+                    composite_score = (s1_net + s2_net + s3_net) + (s1_raw + s2_raw + s3_raw)
+                    # --------------------------------------
+
+                    p['Sem_Top1_Tag'] = sem_tags_raw[0][2] if len(sem_tags_raw) > 0 else "N/A"
+
+                    current_query_results.append({
+                        "Score": p.get('vector_score', 0),
+                        "Composite_Score": composite_score, # <-- NEW COLUMN
+                        "Sem_Top1_Score_Net": s1_net,
+                        "Sem_Top1_Raw": s1_raw,
+                        "Sem_Top2_Score_Net": s2_net,
+                        "Sem_Top2_Raw": s2_raw,
+                        "Sem_Top3_Score_Net": s3_net,
+                        "Sem_Top3_Raw": s3_raw,
+                        "Title": p.get('title', "Untitled"),
+                        "Abstract": p.get('snippet', 'N/A'),
+                        "Source": "PubMed",
+                        "Query": query_str,
+                    })
+        
+        if current_query_results:
+            # --- ENFORCING THE LIMIT HERE ---
+            final_query_results = current_query_results[:limit]
+            
+            final_query_results.sort(key=lambda x: x['Score'], reverse=True)
+            all_results_grouped[query_str] = final_query_results
+        
+        prog_bar.progress((i + 1) / len(qs))
+
+    status_text.empty()
+    prog_bar.empty()
+
+    # 4. Display Report (Grouped)
+    if not all_results_grouped:
+        st.warning("No papers found in the specified range for any query.")
+        return
+
+    # --- CSV DOWNLOAD LOGIC ---
+    flat_results = []
+    for query, results in all_results_grouped.items():
+        for res in results:
+            flat_results.append({
+                "Query_String": query,
+                "Overall_Vector_Score": res['Score'],
+                "Composite_Score": res['Composite_Score'], # <-- NEW CSV COLUMN
+                "Semantic_Top1_Net_Score": res['Sem_Top1_Score_Net'],
+                "Semantic_Top1_Raw_Score": res['Sem_Top1_Raw'],
+                "Semantic_Top2_Net_Score": res['Sem_Top2_Score_Net'],
+                "Semantic_Top2_Raw_Score": res['Sem_Top2_Raw'],
+                "Semantic_Top3_Score_Net": res['Sem_Top3_Score_Net'],
+                "Semantic_Top3_Raw_Score": res['Sem_Top3_Raw'],
+                "Title": res['Title'],
+                "Abstract": res['Abstract'],
+                "Source": res['Source']
+            })
+            
+    df_csv = pd.DataFrame(flat_results)
+    
+    csv_output = df_csv.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="⬇️ Download Full Vector Tuning Report (CSV)",
+        data=csv_output,
+        file_name="vector_tuning_report.csv",
+        mime="text/csv",
+        key="vector_report_download"
+    )
+    st.markdown("---")
+    # --- END NEW CSV LOGIC ---
+
+    # Display Grouped Report in UI
+    for query, results in all_results_grouped.items():
+        st.markdown(f"#### ➡️ Query: `{query}`")
+        
+        df = pd.DataFrame(results)
+        
+        # Define columns visible in the report
+        report_cols = [
+            "Score", "Composite_Score", "Sem_Top1_Score_Net", "Sem_Top1_Raw", 
+            "Sem_Top2_Score_Net", "Sem_Top2_Raw", "Sem_Top3_Score_Net", "Sem_Top3_Raw",
+            "Title", "Abstract", "Source"
+        ]
+        
+        st.dataframe(
+            df[report_cols],
+            column_config={
+                "Score": st.column_config.ProgressColumn(
+                    "Overall Vector Score", format="%.4f", min_value=0, max_value=1
+                ),
+                "Composite_Score": st.column_config.ProgressColumn(
+                    "COMPOSITE SCORE (0-6)", format="%.3f", min_value=-3.0, max_value=6.0 # Adjusted range based on expected max score
+                ),
+                "Sem_Top1_Score_Net": st.column_config.NumberColumn("S1 Net", format="%.3f"),
+                "Sem_Top1_Raw": st.column_config.NumberColumn("S1 Raw", format="%.3f"),
+                "Sem_Top2_Score_Net": st.column_config.NumberColumn("S2 Net", format="%.3f"),
+                "Sem_Top2_Raw": st.column_config.NumberColumn("S2 Raw", format="%.3f"),
+                "Sem_Top3_Score_Net": st.column_config.NumberColumn("S3 Net", format="%.3f"),
+                "Sem_Top3_Raw": st.column_config.NumberColumn("S3 Raw", format="%.3f"),
+                "Title": st.column_config.TextColumn("Paper Title", width="medium"),
+                "Abstract": st.column_config.TextColumn("Snippet", width="large"),
+                "Source": st.column_config.TextColumn("DB", width="small")
+            },
+            use_container_width=True,
+            height=min(len(results) * 35 + 50, 500), # Dynamic height up to 500px
+            hide_index=True
+        )
+
+
+def generate_semantic_tags(abstract_text: str, semantic_sentences: List[tuple], semantic_model, top_n: int = 3):
+    """
+    Generates tags based on semantic similarity and returns scores for the Top N matches.
+    Returns a list of the top N tuples: (Net_Contribution_Score, Raw_Similarity_Score, CustomTag, MatchSentence)
     """
     # Filter enabled sentences
     enabled_entries = [s for s in semantic_sentences if s[1]]
@@ -1036,34 +1363,45 @@ def generate_semantic_tags(abstract_text: str, semantic_sentences: List[tuple], 
         abs_emb = semantic_model.encode(abstract_text)
         sent_embs = semantic_model.encode(enabled_texts)
         
-        # Calculate scores
-        sims = []
+        # Calculate scores and accumulate net score
+        sims_with_tags = []
         from numpy import dot
         from numpy.linalg import norm
-        for s_emb in sent_embs:
+        
+        # We will use a fixed weight for positive/negative contribution
+        POSITIVE_WEIGHT = 1.0
+        NEGATIVE_WEIGHT = 0.5 # Penalize by half the positive weight
+        
+        for idx, s_emb in enumerate(sent_embs):
             sim = dot(abs_emb, s_emb) / (norm(abs_emb) * norm(s_emb))
-            sims.append(sim)
-        
-        sims = np.array(sims)
-        
-        # Winner Takes All: Find max score
-        best_idx = sims.argmax()
-        best_score = sims[best_idx]
-        
-        # Apply single tag if threshold met (0.4)
-        if best_score > 0.4:
+            
             # Structure is (Sentence, Enabled, Pass, CustomTag)
-            custom_tag = enabled_entries[best_idx][3]
-            match_sentence = enabled_entries[best_idx][0]
+            _, _, pass_state, custom_tag = enabled_entries[idx]
+            match_sentence = enabled_entries[idx][0]
             
             clean_tag = re.sub(r'[^a-zA-Z0-9_\-]+', '', custom_tag)
-            # RETURN TUPLE: (Tag, Sentence)
-            return [(f"sTag-{clean_tag}", match_sentence)]
             
-        return []
+            # Determine contribution to the NET score
+            if pass_state:
+                # Positive contribution
+                contribution = sim * POSITIVE_WEIGHT
+            else:
+                # Negative contribution (Penalty)
+                contribution = - (sim * NEGATIVE_WEIGHT)
+            
+            # Store (Net_Contribution_Score, Raw_Similarity_Score, Tag, Sentence)
+            sims_with_tags.append((contribution, sim, f"sTag-{clean_tag}", match_sentence))
+            
+        # Sort by NET CONTRIBUTION SCORE descending
+        sims_with_tags.sort(key=lambda x: x[0], reverse=True)
+        
+        # Return the top N results
+        return sims_with_tags[:top_n]
+            
     except Exception as e:
         logging.error(f"Semantic Tag Error: {e}")
         return []
+
 
 def _chunks(seq, n):
     for i in range(0, len(seq), n):
@@ -1093,7 +1431,6 @@ def remove_think_tags(text):
         
     return clean_text.strip()
 
-                                                                 
 def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_query, model, suggested_tags=None, priority_topics=None):
     use_ollama = st.session_state.get("use_ollama", False)
     
@@ -1102,8 +1439,12 @@ def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_quer
     if suggested_tags and len(suggested_tags) > 0:
         tags_instruction = f"OFFICIAL TAG LIST: {', '.join(suggested_tags)}\nSelect relevant tags from this list."
     else:
-        tags_instruction = "Generate 3-5 relevant tags."
+        tags_instruction = "Generate 2-8 relevant tags."
 
+    # --- NEW LOGIC: Always include Title and Snippet (Abstract), and truncate PDF text ---
+    # We use the original snippet (which is the metadata abstract) as the primary abstract source
+    # We use the full_text_context (which is the extracted PDF/Web text) for deep context
+    
     context_text = pdf_text[:40000] if pdf_text else 'N/A'
 
     prompt = f"""
@@ -1111,21 +1452,21 @@ def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_quer
     
     METADATA:
     Title: {title}
-    Abstract: {snippet}
-    Full Text Segment: {context_text}
+    Abstract (Source/Snippet): {snippet}  <-- ALWAYS INCLUDE TITLE AND ABSTRACT
+    Full Text Segment: {context_text}      <-- Deep context from PDF/Web
     User Query: {user_query}
-    Priority Interests (FOR EXTRACTION ONLY): {priority_topics}
 
     INSTRUCTIONS:
     1. ANALYZE RELEVANCE (0-3).
-       - Score based strictly on the alignment between the 'Priority Interests' list and the paper content.
-       - NEGATIVE CONSTRAINT: Do NOT consider the  'User Query' or 'Priority Interests' as verbiage to score. Only use the 'Title' and 'Abstract' to calculate the relevance score.
+       - Score based on any of the following, high score takes all.
+       A.  Score high if the alignment between the 'Priority Interests' list and the paper content is high.
+           *  'Priority Interests' list:  herbs, herbal compounds. Including phytochemicals, Phytonutrient,  TCM, polyphenols, plant extracts,  phenolic acids, coumarins, stilbenes, Terpenoids, Terpenes, Glucosinolates, Organosulfur, Phytosterols, Saponins, flavonoids, Homology modeling
+       B.  Score high if the abstract or title infers the topic is herbs or herbal compounds, herbal acids, or anything else from a natural source.
+       C.  Score high if there is any mention of TCM (chinese traditional medicine)
+
     2. EXTRACT TAGS (Comma separated). {tags_instruction}
     3. SUMMARIZE findings (Bullet points).
-    4. EXTRACT SUBSTANCES (Chemicals and Plants):
-       - Use 'Priority Interests' as a reference for what to look for.
-       - CRITICAL: Only list substances EXPLICITLY mentioned in the paper text provided above.
-       - DO NOT hallucinate plants or chemicals based on the 'Priority Interests' list.
+    4. EXTRACT SUBSTANCES (Phytochemicals and Plants):
        - If the paper does not mention specific plants or chemicals, strictly write "None".
 
     OUTPUT FORMAT (STRICTLY USE THESE HEADERS):
@@ -1135,10 +1476,12 @@ def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_quer
     <tag1, tag2, tag3>
     ###SUMMARY###
     <Bullet points of key findings>
-    ###CHEMICALS###
-    <List of pure chemicals found in the text, or "None">
+    ###PHYTOCHEMICALS###
+    <List of phytochemicals and natural substances found in the text, or "None">
     ###PLANTS###
-    <List of whole plants/herbs found in the text, or "None">
+    <List of the plants as possible canadates of these phytochemicals, natural substances, or "None">
+    ###possible_PLANTS###
+    <List of  plants/herbs of similar found in the text, or "None">
     """
     
     # --- LOGGING: Full Prompt Sent ---
@@ -1152,7 +1495,7 @@ def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_quer
         if use_ollama:
             # DIRECT CALL - NO CHECKS - NO ROADBLOCKS
             raw_text = query_ollama_chat(model, prompt)
-            print(f"\n{'='*40}\n[OLLAMA RESPONSE]\n{raw_text}\n{'='*40}\n")
+            # (Stream printing handled inside query_ollama_chat)
         elif client:
             for attempt in range(3):
                 try:
@@ -1166,14 +1509,11 @@ def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_quer
                     break
                 except Exception as e:
                     if attempt < 2 and handle_gemini_backoff(str(e)): continue
-                    # Error return structure updated to tuple(5)
                     return f"API FAILURE: {e}", [], 0, "None", "None"
         else:
-             # Error return structure updated to tuple(5)
             return "API KEY MISSING", [], 0, "None", "None"
 
     except Exception as e:
-         # Error return structure updated to tuple(5)
         return f"EXECUTION ERROR: {e}", [], 0, "None", "None"
 
     # --- PARSING ---
@@ -1197,19 +1537,23 @@ def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_quer
     summary_matches = re.findall(r"(?:\*\*|)?###\s*SUMMARY\s*###(?:\*\*|)?\s*(.*?)(?=\n(?:\*\*|)?###|$)", text, re.DOTALL | re.IGNORECASE)
     summary_txt = summary_matches[-1].strip() if summary_matches else "Analysis unavailable."
 
-    chems_matches = re.findall(r"(?:\*\*|)?###\s*CHEMICALS\s*###(?:\*\*|)?\s*(.*?)(?=\n(?:\*\*|)?###|$)", text, re.DOTALL | re.IGNORECASE)
+    chems_matches = re.findall(r"(?:\*\*|)?###\s*PHYTOCHEMICALS\s*###(?:\*\*|)?\s*(.*?)(?=\n(?:\*\*|)?###|$)", text, re.DOTALL | re.IGNORECASE)
     chemicals = chems_matches[-1].strip() if chems_matches else "None listed"
 
     plants_matches = re.findall(r"(?:\*\*|)?###\s*PLANTS\s*###(?:\*\*|)?\s*(.*?)(?=\n(?:\*\*|)?###|$)", text, re.DOTALL | re.IGNORECASE)
     plants = plants_matches[-1].strip() if plants_matches else "None listed"
+    
+    possplants_matches = re.findall(r"(?:\*\*|)?###\s*possible_PLANTS\s*###(?:\*\*|)?\s*(.*?)(?=\n(?:\*\*|)?###|$)", text, re.DOTALL | re.IGNORECASE)
+    possplants = possplants_matches[-1].strip() if possplants_matches else "None listed"
 
     # --- BUILD CLEAN REPORT ---
     # UPDATED: Uses Unicode escape \U0001F9EA for the test tube emoji to prevent SyntaxError
     substances_display = (
         "\n---\n"
         "**\U0001F9EA Substances & Plants**\n"
-        f"*   **Chemicals:** {chemicals}\n"
+        f"*   **PhytoChemicals:** {chemicals}\n"
         f"*   **Plants:** {plants}\n"
+        f"*   **possible_Plants:** {possplants}\n"        
     )
 
     clean_report = f"""
@@ -1218,8 +1562,9 @@ def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_quer
 {substances_display}
 """
     # RETURN TUPLE (5): report, tags, score, chemicals, plants                                                                          
-    return clean_report, tags, score, chemicals, plants
-
+    return clean_report, tags, score, chemicals, plants    
+    
+    
 def gemini_abstract_fallback(title, authors_info, current_snippet, model, full_text=None):
     """
     Generates an abstract.
@@ -1690,7 +2035,7 @@ def _display_paper_details(paper_data, idx_key):
             if ok: st.toast(f"✅ Saved to Zotero: {title}")
             else: st.error(f"Zotero Error: {msg}")
 
-def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_ph, prog_ph, query_stats, collection_override=None, vec_min_override=None):
+def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_ph, prog_ph, query_stats, collection_override=None, vec_min_override=None, composite_min_override=None):
     annotated = 0
     saved = 0
     
@@ -1701,12 +2046,14 @@ def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_
     min_len = st.session_state.abstract_length_slider
     z_thresh = st.session_state.min_score3_slider
     
-    # --- LOGIC UPDATE: USE ROW SETTING IF AVAILABLE, ELSE GLOBAL SLIDER ---
+    # Vector Min resolution
     if vec_min_override is not None:
         vec_min = float(vec_min_override)
     else:
         vec_min = st.session_state.vector_score_min_slider
-    # ----------------------------------------------------------------------
+
+    # Composite Min resolution
+    comp_min = float(composite_min_override) if composite_min_override is not None else 0.0
     
     # Filter Config
     req_vals = [v.lower() for v in st.session_state.ai_tag_post_filter_values]
@@ -1715,6 +2062,7 @@ def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_
     # Speed Up Settings
     enable_speedup = st.session_state.enable_speedup_checkbox
     speedup_threshold = st.session_state.speedup_threshold_slider
+    skip_low_yield = st.session_state.get("skip_low_yield_checkbox", False)
     
     # AI Model Resolution
     if st.session_state.get("use_ollama"):
@@ -1725,143 +2073,125 @@ def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_
     
     # Context
     topics_context = st.session_state.get("topics_txt", "")
-
-    # 1. Preranking & Vector Filter
+    
+    # 1. Preranking (Calculate Vector Scores)
     sem_model = get_embedding_model()
     if sem_model:
         chunk = prerank_papers(chunk, query, sem_model)
-        # Use the variable 'vec_min' determined above
-        if vec_min > 0.0:
-            original_count = len(chunk)
-            chunk = [p for p in chunk if p.get('vector_score', 0) >= vec_min]
-            dropped = original_count - len(chunk)
-            if dropped > 0:
-                logging.info(f"Vector Filter: Dropped {dropped} papers (Score < {vec_min})")
-    
+        # --- CRITICAL CHANGE: DO NOT DROP PAPERS HERE ---
+        # We removed the early "Vector Filter" block. 
+        # All papers proceed to the loop so we can calculate Composite Scores.
+
     if not chunk: return 0, 0
 
     for i, paper in enumerate(chunk):
+        if query_stats.get('abort', False): break
+
         start_time = time()
         idx = papers_processed + i
         bypass_ai = query_stats.get('bypass_ai', False)
         
-        # --- LOGGING UPDATE: Display Raw Source Data if Abstract Missing ---
-        initial_snippet = paper.get("snippet", "")
-        print(f"\n{'='*40}\n[PROCESSING RECORD {idx+1}]\nTITLE: {paper.get('title')}")
-        
-        if not initial_snippet:
-            # If missing, show the user exactly what the API gave us (excluding huge fields)
-            debug_paper = {k: v for k, v in paper.items() if k != 'original_abstract'}
-            print(f"SOURCE VERBIAGE: ((NO ABSTRACT FOUND))")
-            print(f"RAW METADATA DUMP: {debug_paper}")
-        else:
-            print(f"SOURCE VERBIAGE (First 500 chars):\n{initial_snippet[:500]}...")
-        print(f"{'='*40}\n")
-        # ------------------------------------------------
-
         # 2. Duplicate Check
         doi = paper.get("doi")
         is_dup = False
         if doi and (not st.session_state.allow_duplicates) and check_zotero_duplicate(doi, st.session_state.user_zotero_id, target_collection):
              is_dup = True
 
-        # ==========================================================
-        # 3. TEXT EXTRACTION HIERARCHY (Updated with Smart Harvester)
-        # ==========================================================
+        # 3. Text Extraction
         full_text_context = ""
-        
-        # LOGIC INJECTION: Check if Abstract exists in metadata
         current_snippet = paper.get("snippet", "")
-        
         if current_snippet and len(current_snippet) >= min_len:
-             logging.info(f"✅ Abstract Sourced from Metadata (Skipping PDF/Web): {paper.get('title')[:30]}...")
              paper["snippet_source"] = "METADATA"
-        
         elif not bypass_ai:
-            logging.info(f"📉 Abstract Missing/Short: Initiating Smart Harvest for {paper.get('title')[:30]}...")
-            
-            # --- THE FIX: DETERMINE TARGET URL FOR "CLICK" ---
-            target_url = ""
-            # Priority 1: Use DOI to "click" through to publisher (Standard)
-            if paper.get("doi"):
-                 target_url = f"https://doi.org/{paper.get('doi')}"
-            # Priority 2: Use the provided URL (S2 page or direct link)
-            elif paper.get("url"):
-                 target_url = paper.get("url")
-            
+            target_url = paper.get("url") or (f"https://doi.org/{paper.get('doi')}" if paper.get("doi") else "")
             if target_url:
-                # Trigger the Smart Harvester (extract_webpage_text now handles the detective work)
                 full_text_context = extract_webpage_text(target_url)
-
-                # --- UPDATE UI IF API FAILED BUT SCRAPER WORKED ---
                 if not paper.get("original_abstract") and full_text_context:
-                    # Limit to 3000 chars for display so it doesn't flood the UI
-                    paper["original_abstract"] = full_text_context[:3000] + ("..." if len(full_text_context) > 3000 else "")
+                    paper["original_abstract"] = full_text_context[:3000]
 
-        # 4. Abstract Fallback
-        # If the original snippet is too short, we ask AI to generate one using the full text we just found.
         snip = paper.get("snippet", "")
-        if len(snip) < min_len:
-            if not bypass_ai:
-                # NOTE: logging of the "Complete Verb" happens inside this function
-                snip = gemini_abstract_fallback(paper.get("title"), paper.get("authors_info"), snip, actual_model_id, full_text=full_text_context)
-                paper["snippet"] = snip
-                paper["snippet_source"] = "AI_FALLBACK"
+        if len(snip) < min_len and not bypass_ai:
+             snip = gemini_abstract_fallback(paper.get("title"), paper.get("authors_info"), snip, actual_model_id, full_text=full_text_context)
+             paper["snippet"] = snip
 
-        # 5. AI Annotation (Updated Unpacking for Chemicals/Plants)
+        # 5. AI Annotation & Semantic Scoring
+        sem_tags_results = [] 
         if is_dup:
-            ai_abs, tags, score, chemicals, plants = "Duplicate - Skipped Analysis", [], 0, "None", "None"
+            ai_abs, tags, score, chemicals, plants = "Duplicate", [], 0, "None", "None"
         elif bypass_ai:
-            ai_abs, tags, score, chemicals, plants = "Auto-Saved (Speed Mode)", ["Speed-Save"], 3, "Skipped", "Skipped"
+            ai_abs, tags, score, chemicals, plants = "Auto-Saved", ["Speed-Save"], 3, "Skipped", "Skipped"
         else:
             ai_abs, tags, score, chemicals, plants = gemini_annotate_paper(
                 paper.get("title"), paper.get("authors_info"), snip, full_text_context, paper.get("url"), query, actual_model_id,
                 suggested_tags=suggested_tags, priority_topics=topics_context
             )
-            if "API FAILURE" not in ai_abs: annotated += 1
+            if "API FAILURE" not in ai_abs: 
+                annotated += 1
+                # Calculate Semantics (Top 3)
+                sem_tags_results = generate_semantic_tags(ai_abs if not bypass_ai else snip, st.session_state.semantic_sentences, sem_model, top_n=3)
 
-        # 6. Semantic Tags
+        # 6. Semantic Tags Display
         if sem_model and "API FAILURE" not in ai_abs and not is_dup:
-            stags = generate_semantic_tags(ai_abs if not bypass_ai else snip, st.session_state.semantic_sentences, sem_model)
+            stags = generate_semantic_tags(ai_abs if not bypass_ai else snip, st.session_state.semantic_sentences, sem_model, top_n=1)
             tags.extend(stags)
 
-        # 7. Save Logic & Filtering
-        passes = True
-        missing_filters = []
+        # 7. Qualification Logic
+        
+        # --- CALCULATE COMPOSITE SCORE ---
+        current_composite_score = 0.0
+        if sem_tags_results:
+            for item in sem_tags_results:
+                current_composite_score += (item[0] + item[1]) # Net + Raw
+        
+        # --- CONSOLE LOGGING ---
+        v_score = paper.get('vector_score', 0.0)
+        print(f"   [PAPER] {paper.get('title')[:40]}... | Vector: {v_score:.4f} (Min: {vec_min}) | Composite: {current_composite_score:.4f} (Min: {comp_min})")
+        
+        # --- FILTER LOGIC ---
+        # 1. Check Vector Filter
+        vector_pass = (v_score >= vec_min)
+        
+        # 2. Check Composite Filter (Only if slider > 0)
+        composite_pass = True
+        if comp_min > 0.0:
+            if current_composite_score < comp_min:
+                composite_pass = False
+        
+        # 3. Check Value Filters
+        passes_value_filter = True
         if req_vals:
-            search_text = (
-                str(paper.get("title", "")) + " " + 
-                str(paper.get("original_abstract", "")) + " " + 
-                str(snip) + " " + 
-                str(ai_abs) + " " + 
-                " ".join([str(t) for t in tags]) # Ensure tags are strings
-            ).lower()
-            passes = any(v in search_text for v in req_vals)
-            if not passes: missing_filters = [v for v in req_vals]
+            search_text = (str(paper.get("title", "")) + " " + str(paper.get("original_abstract", "")) + " " + str(snip) + " " + str(ai_abs) + " " + " ".join([str(t) for t in tags])).lower()
+            passes_value_filter = any(v in search_text for v in req_vals)
 
         status_msg = "SKIPPED"
         reason = ""
-        
-        # --- NEW LOGIC: SUBSTANCE FILTER ---
-        substance_rejected = False
-        if "none" in chemicals.lower() and "none" in plants.lower():
-            substance_rejected = True
+        substance_rejected = ("none" in chemicals.lower() and "none" in plants.lower())
             
         if is_dup:
             status_msg = "DUPLICATE"
-        elif st.session_state.add_to_zotero_state and score >= z_thresh and passes:
+        
+        # FINAL DECISION:
+        # To be saved, it must:
+        # A. Pass Value Filters AND
+        # B. (Pass Vector Filter OR Pass Composite Filter) AND
+        # C. (Have High AI Score OR be Auto-Saved)
+        
+        # Note: If you want strict AND logic (must pass both), change 'or' to 'and' below.
+        # Currently implemented as "Rescue" logic: High Composite can save a Low Vector paper.
+        
+        elif not passes_value_filter:
+            reason = "Failed Value Filter"
+        elif not (vector_pass or composite_pass):
+            reason = f"Failed Both Filters (Vec: {v_score:.2f}<{vec_min}, Comp: {current_composite_score:.2f}<{comp_min})"
+        elif st.session_state.add_to_zotero_state and score >= z_thresh:
             if substance_rejected:
                 status_msg = "REJECTED"
-                reason = "No Substances/Plants Found (Filter)"
+                reason = "No Substances/Plants Found"
             else:
-                # Sanitize tags: Ensure string type and truncate to limit
                 clean_tags = []
                 for t in tags:
-                    if isinstance(t, str):
-                        clean_tags.append({"tag": t[:MAX_TAG_LENGTH]})
-                    elif isinstance(t, tuple) and len(t) > 0:
-                        # Handle accidental tuple tags from semantic search
-                        clean_tags.append({"tag": str(t[0])[:MAX_TAG_LENGTH]})
+                    if isinstance(t, str): clean_tags.append({"tag": t[:MAX_TAG_LENGTH]})
+                    elif isinstance(t, tuple) and len(t) > 0: clean_tags.append({"tag": str(t[0])[:MAX_TAG_LENGTH]})
                 
                 item = {
                     "itemType": "journalArticle",
@@ -1880,10 +2210,9 @@ def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_
                 else: 
                     st.error(f"Zotero Error: {msg}")
         else:
-            if not passes: reason = f"Filters failed (Missing: {', '.join(missing_filters)})"
-            elif score < z_thresh: reason = "Score too low"
+            if score < z_thresh: reason = f"AI Score ({score}) too low"
+            else: reason = "Skipped (Logic Fallthrough)"
         
-        # Speedup Stats
         if not is_dup and not bypass_ai:
             query_stats['processed'] += 1
             if status_msg == "SAVED": query_stats['saved'] += 1
@@ -1891,28 +2220,24 @@ def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_
                 if query_stats['saved'] >= speedup_threshold:
                     query_stats['bypass_ai'] = True
                     st.success("⚡ Smart Speed-Up Triggered!")
+                elif skip_low_yield:
+                    st.warning(f"🛑 Fail Fast Triggered. Aborting.")
+                    query_stats['abort'] = True
+                    break
 
         duration = time() - start_time
-        
-        # Result Object
         result_entry = {
-            'paper': paper,
-            'score': score,
-            'tags': tags,
-            'abstract_ai': ai_abs,
-            'z_thresh': z_thresh,
-            'passes': passes,
-            'status_msg': status_msg,
-            'process_time': duration,
-            'reason': reason
+            'paper': paper, 'score': score, 'tags': tags, 'abstract_ai': ai_abs,
+            'z_thresh': z_thresh, 'passes': passes_value_filter, 'status_msg': status_msg,
+            'process_time': duration, 'reason': reason
         }
-        
         st.session_state.results_history.append(result_entry)
         _display_paper_details(result_entry, len(st.session_state.results_history))
         prog_ph.progress(int((idx / total_papers) * 100) if total_papers else 0)
         st.session_state.cycle_state['paper_offset'] += 1
 
     return annotated, saved
+
 
 # ============================
 # GUI LAYOUT
@@ -1936,9 +2261,15 @@ if search_mode == "Keyword Search":
     with c1:
         st.slider("📏 Min Abstract Len", 50, 500, value=prefs.get("min_abstract_length_chars", 150), key="abstract_length_slider")
         # Global Backup/Manual Mode Vector Slider
-        st.slider("✅ Vector Score (Manual Mode)", 0.00, 1.00, value=prefs.get("vector_score_min_value", 0.50), step=0.01, format="%.2f", key="vector_score_min_slider")
+        st.slider("✅ Vector Score (Manual Mode)", 0.00, 6.00, value=prefs.get("vector_score_min_value", 1.50), step=0.01, format="%.2f", key="vector_score_min_slider")
     with c2:
         st.slider("⭐ Min AI Score", 0, 3, value=prefs.get("min_score3_value", 2), key="min_score3_slider")
+        
+        # --- NEW SLIDER ADDED HERE ---
+        st.slider("✨ Composite Score Min", 0.00, 6.00, value=prefs.get("composite_score_min_value", 0.0), step=0.01, key="composite_score_min_slider", help="Sum of Top 3 Net + Top 3 Raw Semantic Scores")
+        # -----------------------------
+        
+        # ... (rest of c3 code remains the same)
     with c3:
         with st.expander("➕ Manage Target Tags"):
             for i, cat in enumerate(st.session_state.ai_tag_categories_list):
@@ -1951,11 +2282,15 @@ if search_mode == "Keyword Search":
         st.multiselect("🎯 Target Tags (Instruct AI to use these)", st.session_state.ai_tag_categories_list, key="selected_tag_categories")
         st.multiselect("🌪️ Value Filter (Only save papers with these tags)", st.session_state.ai_tag_categories_list, key="ai_tag_post_filter_values")
 
-    # --- SMART SPEED-UP SECTION (MOVED HERE FOR VISIBILITY) ---
+  # --- SMART SPEED-UP SECTION (MOVED HERE FOR VISIBILITY) ---
     with st.expander("⚡ Smart Speed-Up (Auto-Save High Relevance)"):
-        st.checkbox("Enable Smart Speed-Up", value=prefs.get("enable_speedup_value", False), key="enable_speedup_checkbox", help="If enabled, the system checks the first 10 papers. If enough are saved, it skips AI for the rest.")
-        st.slider("Threshold (Saved/10)", 5, 10, value=prefs.get("speedup_threshold_value", 9), key="speedup_threshold_slider", help="How many of the first 10 must be saved to trigger speed-up.")
-
+        c_enable, c_failfast = st.columns(2)
+        with c_enable:
+            st.checkbox("Enable Smart Speed-Up", value=prefs.get("enable_speedup_value", False), key="enable_speedup_checkbox", help="If enabled, the system checks the first 10 papers. If enough are saved, it skips AI for the rest.")
+        with c_failfast:
+            st.checkbox("❌ Fail Fast (Skip Query)", value=prefs.get("skip_low_yield_value", False), key="skip_low_yield_checkbox", help="If the first 10 papers DO NOT meet the threshold below, the entire query is aborted immediately.")
+            
+        st.slider("Threshold (Saved/10)", 5, 10, value=prefs.get("speedup_threshold_value", 9), key="speedup_threshold_slider", help="How many of the first 10 must be saved to trigger speed-up (or skip).")
     # --- QUERY MODE SECTION ---
     q_mode = st.radio("📝 Query Mode", ["Single Query", "Automated Cycle"], horizontal=True, key="query_mode_selector")
     
@@ -1999,7 +2334,7 @@ if search_mode == "Keyword Search":
                     q['stop_rec'] = int(g_stop)
                 st.rerun()
         
-        # Data Editor Setup
+# Data Editor Setup
         current_data = pd.DataFrame(st.session_state.automated_queries)
         
         if not current_data.empty:
@@ -2013,19 +2348,59 @@ if search_mode == "Keyword Search":
         
         if "Select" not in current_data.columns:
             current_data.insert(0, "Select", False)
+            
+        # --- NEW: Add Semantic Sentence Column ---
+        if "semantic_sentence" not in current_data.columns:
+            current_data.insert(len(current_data.columns), "semantic_sentence", "")
+        # ----------------------------------------
+
+# Data Editor Setup
+        current_data = pd.DataFrame(st.session_state.automated_queries)
+        
+        if not current_data.empty:
+            # Ensure proper types for display
+            if 'vector_min' in current_data.columns:
+                current_data['vector_min'] = current_data['vector_min'].astype(float)
+            if 'start_rec' in current_data.columns:
+                current_data['start_rec'] = current_data['start_rec'].astype(int)
+            if 'stop_rec' in current_data.columns:
+                current_data['stop_rec'] = current_data['stop_rec'].astype(int)
+            if 'semantic_threshold' in current_data.columns:
+                current_data['semantic_threshold'] = current_data['semantic_threshold'].astype(float)
+        
+        if "Select" not in current_data.columns:
+            current_data.insert(0, "Select", False)
+            
+        # --- NEW: Add Semantic Sentence Column ---
+        if "semantic_sentence" not in current_data.columns:
+            current_data.insert(len(current_data.columns), "semantic_sentence", "")
+        # ----------------------------------------
 
         st.caption("📋 **Query Execution Queue** (Editable)")
         edited_df = st.data_editor(
             current_data,
             num_rows="dynamic",
             use_container_width=True,
-            width='stretch', # Prepare for future deprecation
+            width='stretch', 
             key="query_table_editor",
             column_config={
                 "Select": st.column_config.CheckboxColumn(width="small"),
                 "query": st.column_config.TextColumn("Query String", required=True, width="large"),
                 "folder": st.column_config.TextColumn("Collection ID", width="small", help="Optional Zotero Key"),
-                "vector_min": st.column_config.NumberColumn("Vec Min", min_value=0.0, max_value=1.0, step=0.01, format="%.2f"),
+                "semantic_sentence": st.column_config.TextColumn("Semantic Sentence (Per Query)", width="medium"), 
+                
+                # --- THIS IS THE NEW SLIDER FOR THE COMPOSITE SUM ---
+                "semantic_threshold": st.column_config.NumberColumn(
+                    "Composite Min", 
+                    min_value=0.0, 
+                    max_value=6.0, 
+                    step=0.01, 
+                    format="%.2f",
+                    help="Min Sum of (Top3 Net + Top3 Raw) to qualify."
+                ), 
+                # --------------------------------------------------
+                
+                "vector_min": st.column_config.NumberColumn("Vec Min", min_value=0.0, max_value=6.0, step=0.01, format="%.2f"),
                 "start_rec": st.column_config.NumberColumn("Start #", min_value=0, step=10),
                 "stop_rec": st.column_config.NumberColumn("Stop #", min_value=1, step=10)
             },
@@ -2144,6 +2519,13 @@ if is_local_ollama:
 
 # --- SIDEBAR ---
 with st.sidebar:
+    # NEW: Tuning Button at the top
+    st.markdown("### 🛠️ Tuning Tools")
+    if st.button("🧪 Tune Vector Filter", use_container_width=True, help="Run a quick search to inspect vector scores and calibrate your filter."):
+        run_vector_tuning_report()
+    
+    st.markdown("---")
+
     st.checkbox("📥 Add to Zotero", key="add_to_zotero_state", value=prefs.get("add_to_zotero_state_value", True))
     st.checkbox("⚠️ Allow Duplicates", key="allow_duplicates", value=prefs.get("allow_duplicates", False))
     st.markdown("---")
@@ -2166,87 +2548,87 @@ def run_cycle_logic(queries):
     total_ann = 0
     total_save = 0
     
-    # --- RESOLVE MODEL ID (GEMINI vs OLLAMA) ---
     if st.session_state.get("use_ollama"):
-        actual_model_id = st.session_state.get("ollama_local_model_selector", "llama3") # Default fallback
+        actual_model_id = st.session_state.get("ollama_local_model_selector", "llama3")
     else:
         selected_key = st.session_state.model_key_selector
         actual_model_id = MODEL_OPTIONS[selected_key]["model_id"]
-    # -------------------------------------------
     
-    # Cycle Management from State
     start_q_idx = st.session_state.cycle_state['query_idx']
-    
-    # Map the selected query strings back to their objects to get folders
     all_objs = st.session_state.automated_queries
-    # Create lookup (maps "query string" -> {object})
     query_map = {obj['query']: obj for obj in all_objs}
     
     for q_idx in range(start_q_idx, len(queries)):
         raw_item = queries[q_idx]
         
-        # --- ROBUSTNESS FIX: Handle Dict vs String input ---
+        # --- LOGIC CORRECTION ---
+        # Whether it comes from the Automated Table (dict) or the Single Query construction (dict),
+        # we must read the keys consistently.
+        
         if isinstance(raw_item, dict):
             query_str = raw_item.get("query", "")
-            # --- LOGIC FIX: Extract Row-Specific Settings ---
-            row_vec_min = raw_item.get("vector_min", 0.50)
+            
+            # 1. Vector Min: Look for 'vector_min'. If missing, fallback to global slider.
+            val_vec = raw_item.get("vector_min")
+            if val_vec is not None and str(val_vec).strip() != "":
+                row_vec_min = float(val_vec)
+            else:
+                row_vec_min = st.session_state.vector_score_min_slider
+
+            # 2. Composite Min: Look for 'semantic_threshold'. If missing, fallback to global slider.
+            val_comp = raw_item.get("semantic_threshold")
+            if val_comp is not None and str(val_comp).strip() != "":
+                row_composite_min = float(val_comp)
+            else:
+                row_composite_min = st.session_state.get("composite_score_min_slider", 0.0)
+
             row_start = int(raw_item.get("start_rec", 0))
             row_stop = int(raw_item.get("stop_rec", 12))
             folder_override = raw_item.get("folder", "").strip()
+            
         else:
+            # Fallback for non-dict items (Manual Mode / Paste Text / URL)
             query_str = str(raw_item)
-            # Default Fallbacks if passing raw strings
             row_vec_min = st.session_state.vector_score_min_slider
+            row_composite_min = st.session_state.get("composite_score_min_slider", 0.0)
             row_start = 0
             row_stop = st.session_state.max_results_slider
             folder_override = ""
-        # ---------------------------------------------------
         
-        # Look up folder if not found in raw_item (for string-based flow)
         if not folder_override and query_str in query_map:
             folder_override = query_map[query_str].get('folder', "").strip()
 
-        # Update state for resume (Query Level)
         st.session_state.cycle_state['query_idx'] = q_idx
         
         status.info(f"Processing: {query_str}")
         
-        # --- SKIP EMPTY QUERIES ---
         if not query_str or not query_str.strip():
             st.warning(f"Skipping empty query at index {q_idx}")
             continue
 
-        # Initialize stats for this query cycle
         query_stats = st.session_state.cycle_state.get('query_stats', {
-            'processed': 0, 'saved': 0, 'bypass_ai': False
+            'processed': 0, 'saved': 0, 'bypass_ai': False, 'abort': False
         })
         
-        if folder_override:
-            st.caption(f"📂 Target Collection: {folder_override}")
+        if folder_override: st.caption(f"📂 Target Collection: {folder_override}")
         
-        # Calculate Limits based on Table Row
         total_limit = row_stop - row_start
-        if total_limit <= 0: total_limit = 5 # Safety fallback
+        if total_limit <= 0: total_limit = 5
         
-        # Calculate Offset for API based on Resume State
-        # If we are resuming the SAME query (q_idx == start_q_idx), we add the paper_offset to the row's start.
         resume_adder = st.session_state.cycle_state['paper_offset'] if q_idx == start_q_idx else 0
         current_api_offset = row_start + resume_adder
         
-        # If we are starting a NEW query, reset the paper_offset in state to 0
         if q_idx != start_q_idx: 
             st.session_state.cycle_state['paper_offset'] = 0
-            st.session_state.cycle_state['query_stats'] = {'processed': 0, 'saved': 0, 'bypass_ai': False}
+            st.session_state.cycle_state['query_stats'] = {'processed': 0, 'saved': 0, 'bypass_ai': False, 'abort': False}
             query_stats = st.session_state.cycle_state['query_stats']
-            current_api_offset = row_start # No resume adder
+            current_api_offset = row_start
 
-        # Calculate remaining limit (Total limit - what we already processed)
         remaining_limit = total_limit - resume_adder
         if remaining_limit <= 0:
             st.info(f"Skipping {query_str}: Range {row_start}-{row_stop} already processed.")
             continue
 
-        # 1. Prepare Query
         final_query = query_str
         if search_mode == "Keyword Search" and st.session_state.get("use_boolean_checkbox"):
             res = gemini_boolean_query(query_str, actual_model_id)
@@ -2256,46 +2638,43 @@ def run_cycle_logic(queries):
         # 2. Acquire
         if search_mode == "Keyword Search":
             source = st.session_state.search_source_selector
+            
             if source in ["Semantic Scholar", "Both"]:
-                # PASS ROW-SPECIFIC OFFSET and LIMIT
                 for chunk in search_semantic_scholar(final_query, remaining_limit, current_api_offset):
-                    # PASS vec_min_override
+                    if query_stats.get('abort'): break
+                    
                     a, s = process_chunk_and_save(
-                        chunk, 
-                        final_query, 
-                        100, 
-                        0, 
-                        status, 
-                        prog, 
-                        query_stats, 
-                        collection_override=folder_override,
-                        vec_min_override=row_vec_min 
+                        chunk, final_query, 100, 0, status, prog, query_stats, 
+                        collection_override=folder_override, 
+                        vec_min_override=row_vec_min,
+                        composite_min_override=row_composite_min
                     )
                     total_ann += a; total_save += s
                     
-            if source in ["PubMed", "Both"]:
+                    if query_stats.get('abort'): 
+                        st.info("⏭️ Moving to next query (Fail Fast triggered).")
+                        break
+            
+            if source in ["PubMed", "Both"] and not query_stats.get('abort'):
                  p_res = search_pubmed_paged(final_query, remaining_limit, current_api_offset)
-                 
-                 # Chunk the results into batches of 50 for AI processing
                  total_pubmed = len(p_res)
                  pubmed_processed_count = 0
 
                  for batch in _chunks(p_res, 50): 
-                    # PASS vec_min_override
+                    if query_stats.get('abort'): break
+
                     a, s = process_chunk_and_save(
-                        batch,
-                        final_query,
-                        total_pubmed, 
-                        pubmed_processed_count, 
-                        status,
-                        prog,
-                        query_stats,
-                        collection_override=folder_override,
-                        vec_min_override=row_vec_min 
+                        batch, final_query, total_pubmed, pubmed_processed_count, 
+                        status, prog, query_stats, collection_override=folder_override, 
+                        vec_min_override=row_vec_min,
+                        composite_min_override=row_composite_min
                     )
-                    total_ann += a
-                    total_save += s
+                    total_ann += a; total_save += s
                     pubmed_processed_count += len(batch)
+                    
+                    if query_stats.get('abort'): 
+                        st.info("⏭️ Moving to next query (Fail Fast triggered).")
+                        break
 
         elif search_mode == "Paste citation / page text":
             refs = gemini_extract_from_text(st.session_state.paste_text, actual_model_id)
@@ -2317,7 +2696,8 @@ def run_cycle_logic(queries):
                     prog, 
                     query_stats, 
                     collection_override=folder_override,
-                    vec_min_override=row_vec_min
+                    vec_min_override=row_vec_min,
+                    composite_min_override=row_composite_min
                 )
                 total_ann += a; total_save += s
 
@@ -2333,18 +2713,18 @@ def run_cycle_logic(queries):
                     prog, 
                     query_stats, 
                     collection_override=folder_override,
-                    vec_min_override=row_vec_min
+                    vec_min_override=row_vec_min,
+                    composite_min_override=row_composite_min
                 )
                 total_ann += a; total_save += s
 
     st.success(f"Run Complete. Annotated: {total_ann}, Saved: {total_save}")
-    # Reset Cycle State on Completion
+    
     st.session_state.cycle_state = {
-        "active": False,
-        "query_idx": 0,
-        "paper_offset": 0,
-        "query_stats": {'processed': 0, 'saved': 0, 'bypass_ai': False}
-    }
+        "active": False, "query_idx": 0, "paper_offset": 0,
+        "query_stats": {'processed': 0, 'saved': 0, 'bypass_ai': False, 'abort': False}
+    }	 
+																	 
 
 # --- RESULTS AREA ---
 st.markdown("---")
@@ -2361,14 +2741,11 @@ else:
 # --- ACTION BUTTONS ---
 c_go, c_pause, c_reset, c_clear = st.columns([2, 1, 1, 2])
 start_run = False
-
-# State-Aware Button Logic
 is_active = st.session_state.cycle_state['active']
 
 with c_go:
     label = "▶️ Resume Cycle" if is_active else "🚀 Go"
     if st.button(label):
-        # --- FIX 3: Prevent starting empty searches ---
         valid_go = True
         qs = []
         if search_mode == "Keyword Search" and st.session_state.query_mode_selector == "Single Query":
@@ -2376,24 +2753,25 @@ with c_go:
                  st.error("Please enter a topic.")
                  valid_go = False
              else:
-                 # Single Query Mode: Fake a list for the generic runner
+                 # --- FIX: Pass BOTH sliders into the dictionary ---
                  qs = [{
                     'query': st.session_state.user_prompt_input,
-                    'vector_min': st.session_state.vector_score_min_slider, # Use fallback
-                    'start_rec': 0, # Default Start
-                    'stop_rec': st.session_state.get('max_results_slider', 20) # Default Stop
+                    'vector_min': st.session_state.vector_score_min_slider,       # Correctly maps Vector Slider
+                    'semantic_threshold': st.session_state.composite_score_min_slider, # Correctly maps Composite Slider
+                    'start_rec': 0,
+                    'stop_rec': st.session_state.get('max_results_slider', 20)
                  }]
+                 # ------------------------------------------------
         elif search_mode == "Keyword Search":
-            # Check Table
             if not st.session_state.automated_queries:
                 st.error("No queries in table.")
                 valid_go = False
             else:
-                qs = st.session_state.automated_queries # List of Dicts
+                qs = st.session_state.automated_queries 
 
         if valid_go:
             if not is_active:
-                st.session_state.cycle_state['paper_offset'] = 0 # Default start is handled per-row now
+                st.session_state.cycle_state['paper_offset'] = 0 
                 st.session_state.cycle_state['query_idx'] = 0
             
             st.session_state.cycle_state['active'] = True
@@ -2434,4 +2812,4 @@ if start_run:
     if qs:
         run_cycle_logic(qs)
     else:
-        st.error("No query selected.")
+        st.error("No query selected.") 
