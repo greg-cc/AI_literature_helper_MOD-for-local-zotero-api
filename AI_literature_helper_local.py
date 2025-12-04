@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*- version 2.1 added expand all for printing all results
+# -*- coding: utf-8 -*- version 2.1.1 changed ai instructions to infer subject matter.
 import streamlit as st
 import pandas as pd  # Required for the Data Editor
 import requests, json, re, os, io, csv
@@ -771,17 +771,15 @@ def extract_pdf_text(url):
 
 def extract_webpage_text(url):
     """
-    Smart Harvester (Cluster/Density Update):
-    1. Detects Semantic Scholar URLs and finds 'External Link' button.
+    Smart Harvester (Cluster/Density Update - v3 S2 Link Fix):
+    1. Detects Semantic Scholar URLs and finds the primary 'External Link' button 
+       (e.g., "View on PubMed") using specific data attributes from the DOM.
     2. Resolves Publisher URLs.
     3. Checks for <meta name="citation_pdf_url"> (Hidden PDF).
-    4. Falls back to "Cluster Density" Paragraph Hunting.
-       - Identifies the specific HTML container (div/article) with the most valid text.
-       - Ignores sidebars, footers, and reference lists outside that container.
+    4. Cluster Density Hunting (Strict Mode).
     """
     if not url or url.endswith('.pdf'): return ""
     
-    # --- USER FEEDBACK: EXTRACTION START ---
     logging.info(f"🕵️ Smart Harvester investigating: {url}...")
     
     headers = {
@@ -789,20 +787,37 @@ def extract_webpage_text(url):
     }
     
     try:
-        # STEP 1: S2 Button "Click" Logic (Keep existing logic)
+        # STEP 1: Semantic Scholar External Link Logic (UPDATED)
         if "semanticscholar.org" in url:
             logging.info("Detected Semantic Scholar Page. Searching for External Link Button...")
-            s2_resp = requests.get(url, headers=headers, timeout=10)
-            if s2_resp.status_code == 200:
-                s2_soup = BeautifulSoup(s2_resp.content, 'html.parser')
-                ext_link = s2_soup.find("a", attrs={"data-heap-id": "paper-link"})
-                if not ext_link:
-                    ext_link = s2_soup.find("a", class_=lambda x: x and "icon-button" in x and "button--primary" in x)
-                
-                if ext_link and ext_link.get('href'):
-                    new_target = ext_link['href']
-                    logging.info(f"Found External Publisher Link on S2: {new_target}")
-                    return extract_webpage_text(new_target) # RECURSE
+            try:
+                s2_resp = requests.get(url, headers=headers, timeout=10)
+                if s2_resp.status_code == 200:
+                    s2_soup = BeautifulSoup(s2_resp.content, 'html.parser')
+                    
+                    # Strategy A: Exact match on data-test-id (from your screenshot)
+                    ext_link = s2_soup.find("a", attrs={"data-test-id": "paper-link"})
+                    
+                    # Strategy B: Match on the specific wrapper class (from your screenshot)
+                    if not ext_link:
+                        wrapper = s2_soup.find("div", class_=lambda x: x and "alternate-sources__paperlink-wrapper" in x)
+                        if wrapper:
+                            ext_link = wrapper.find("a", href=True)
+
+                    # Strategy C: Fallback to heap ID
+                    if not ext_link:
+                        ext_link = s2_soup.find("a", attrs={"data-heap-id": "paper_link_target"})
+
+                    if ext_link and ext_link.get('href'):
+                        new_target = ext_link['href']
+                        # Handle relative links if necessary (though usually absolute on S2)
+                        if new_target.startswith('/'):
+                            new_target = "https://www.semanticscholar.org" + new_target
+                            
+                        logging.info(f"🔗 Found External Source Link: {new_target}")
+                        return extract_webpage_text(new_target) # RECURSE to the new URL
+            except Exception as e:
+                logging.warning(f"S2 Link Follow Failed: {e}")
         
         # STEP 2: Request the Publisher Landing Page
         resp = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
@@ -818,88 +833,86 @@ def extract_webpage_text(url):
             if extracted_pdf_text and len(extracted_pdf_text) > 200:
                 return extracted_pdf_text
 
-        # STEP 4: Cluster Density Hunting (New Strategy)
+        # STEP 4: Cluster Density Hunting (Strict Mode)
         logging.info("No direct PDF found. Running Cluster Density analysis...")
         
         # A. Remove structural clutter tags
-        for element in soup(["script", "style", "nav", "footer", "header", "meta", "noscript", "aside", "form", "button", "input", "iframe"]):
+        for element in soup(["script", "style", "nav", "footer", "header", "meta", "noscript", "aside", "form", "button", "input", "iframe", "svg"]):
             element.decompose()
         
         # B. Define Keywords for Garbage Filtering
         garbage_triggers = [
             "copyright", "all rights reserved", "download citation", "view author", 
             "search author", "log in", "sign up", "et al.", "vol.", "pp.", "doi:", 
-            "google scholar", "pubmed", "crossref", "cited by", "similar articles"
+            "google scholar", "pubmed", "crossref", "cited by", "similar articles",
+            "related articles", "subscribe", "access provided by"
         ]
 
         # C. Initialize Scoring
-        # We will map {Parent_Node: Score}
         parent_scores = {}
-        
-        # Find ALL paragraphs in the document
         all_paragraphs = soup.find_all('p')
         
         for p in all_paragraphs:
             text = p.get_text(" ", strip=True)
+            word_count = len(text.split())
             
             # --- FILTER LEVEL 1: Basic Hygiene ---
-            # Must be > 30 words and start with Uppercase
-            if len(text.split()) < 30: continue
-            if not text[0].isupper(): continue
+            if word_count < 20: continue 
             if any(trigger in text.lower() for trigger in garbage_triggers): continue
 
             # --- FILTER LEVEL 2: The "Three Sentence" Rule ---
-            # Split by sentence terminators followed by a Capital letter
             sentences = re.split(r'[.!?]\s+(?=[A-Z])', text)
+            if len(sentences) < 2: continue 
             
-            # Must have at least 3 sentences
-            if len(sentences) < 3: continue
-            
-            # Count sentences with at least 4 words
-            valid_sentences_count = 0
-            for s in sentences:
-                if len(s.split()) >= 4:
-                    valid_sentences_count += 1
-            
-            # STRICT REQUIREMENT: At least 3 robust sentences
-            if valid_sentences_count < 3: continue
-
             # --- SCORING ---
-            # If it passes, add the length of the text to the parent's score.
-            # This creates a "gravity well" around the main article div.
             parent = p.parent
-            # Move up one level if the parent is just a generic wrapper (optional optimization)
-            if parent.name in ['span', 'strong', 'em', 'a']:
+            if parent.name in ['span', 'strong', 'em', 'a', 'b', 'i']:
                 parent = parent.parent
-                
+            
+            score = len(text)
+            if word_count > 60: score *= 1.5 
+            
             current_score = parent_scores.get(parent, 0)
-            parent_scores[parent] = current_score + len(text)
+            parent_scores[parent] = current_score + score
 
         # D. Pick the Winner
         if not parent_scores:
             logging.warning("Cluster Analysis: No valid text clusters found.")
             return ""
 
-        # Find the parent element with the highest score
         best_parent = max(parent_scores, key=parent_scores.get)
         logging.info(f"Cluster Analysis: Winner found (<{best_parent.name}>) with score {parent_scores[best_parent]}")
 
-        # E. Extract Text ONLY from the Winner
-        # We re-iterate through the winner's paragraphs to ensure order
+        # E. Extract Text ONLY from the Winner (With Stop Logic)
         final_blocks = []
-        for p in best_parent.find_all('p'):
-            t = p.get_text(" ", strip=True)
-            # Re-apply basic length filter to avoid caption snippets inside the main div
-            if len(t.split()) > 15: 
-                final_blocks.append(t)
         
-        clean_text = "\n\n".join(final_blocks)
+        for child in best_parent.descendants:
+            if child.name in ['h1', 'h2', 'h3', 'h4', 'h5']:
+                header_text = child.get_text().lower()
+                if "reference" in header_text or "bibliography" in header_text or "cited literature" in header_text:
+                    logging.info("Hit Reference section. Stopping extraction.")
+                    break
+            
+            if child.name == 'p':
+                t = child.get_text(" ", strip=True)
+                if len(t.split()) > 15: 
+                    final_blocks.append(t)
+        
+        seen = set()
+        unique_blocks = []
+        for b in final_blocks:
+            if b not in seen:
+                unique_blocks.append(b)
+                seen.add(b)
+
+        clean_text = "\n\n".join(unique_blocks)
         return clean_text[:40000]
             
     except Exception as e:
         logging.warning(f"Smart Harvester Failed for {url}: {e}")
     
     return ""
+
 
 def check_zotero_duplicate(doi: str, library_id: str, collection_id: str) -> bool:
     """Checks Zotero Cloud API for existing DOI."""
@@ -1434,17 +1447,12 @@ def remove_think_tags(text):
 def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_query, model, suggested_tags=None, priority_topics=None):
     use_ollama = st.session_state.get("use_ollama", False)
     
-    # --- PROMPT ---
     tags_instruction = ""
     if suggested_tags and len(suggested_tags) > 0:
         tags_instruction = f"OFFICIAL TAG LIST: {', '.join(suggested_tags)}\nSelect relevant tags from this list."
     else:
         tags_instruction = "Generate 2-8 relevant tags."
 
-    # --- NEW LOGIC: Always include Title and Snippet (Abstract), and truncate PDF text ---
-    # We use the original snippet (which is the metadata abstract) as the primary abstract source
-    # We use the full_text_context (which is the extracted PDF/Web text) for deep context
-    
     context_text = pdf_text[:40000] if pdf_text else 'N/A'
 
     prompt = f"""
@@ -1452,17 +1460,17 @@ def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_quer
     
     METADATA:
     Title: {title}
-    Abstract (Source/Snippet): {snippet}  <-- ALWAYS INCLUDE TITLE AND ABSTRACT
-    Full Text Segment: {context_text}      <-- Deep context from PDF/Web
+    Abstract: {snippet}
+    Full Text Segment: {context_text}
     User Query: {user_query}
 
     INSTRUCTIONS:
     1. ANALYZE RELEVANCE (0-3).
        - Score based on any of the following, high score takes all.
-       A.  Score high if the alignment between the 'Priority Interests' list and the paper content is high.
-           *  'Priority Interests' list:  herbs, herbal compounds. Including phytochemicals, Phytonutrient,  TCM, polyphenols, plant extracts,  phenolic acids, coumarins, stilbenes, Terpenoids, Terpenes, Glucosinolates, Organosulfur, Phytosterols, Saponins, flavonoids, Homology modeling
-       B.  Score high if the abstract or title infers the topic is herbs or herbal compounds, herbal acids, or anything else from a natural source.
-       C.  Score high if there is any mention of TCM (chinese traditional medicine)
+       A.  **Direct Match:** Score high if the content aligns with: herbs, herbal compounds, phytochemicals, Phytonutrient, TCM, polyphenols, plant extracts, phenolic acids, coumarins, stilbenes, Terpenoids, Terpenes, Glucosinolates, Organosulfur, Phytosterols, Saponins, flavonoids, Homology modeling.
+       B.  **Implicit/Chemical Inference:** Score high if the paper discusses a specific compound (e.g., "Quercetin", "Berberine", "Allicin") that you recognize as a phytochemical/natural product, **EVEN IF** the words "herb", "plant", or "phytochemical" are not explicitly written in the text.
+       C.  **Methodological Inference:** Score high if the text mentions "extracts", "fractions", "isolated from", "ethnomedicine", or "natural product discovery", implying a natural source.
+       D.  **TCM:** Score high if there is any mention of TCM (Traditional Chinese Medicine) or Kampo.
 
     2. EXTRACT TAGS (Comma separated). {tags_instruction}
     3. SUMMARIZE findings (Bullet points).
@@ -1484,28 +1492,22 @@ def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_quer
     <List of  plants/herbs of similar found in the text, or "None">
     """
     
-    # --- LOGGING: Full Prompt Sent ---
+    # --- LOGGING ---
     provider_label = "OLLAMA" if use_ollama else "GEMINI"
-    print(f"\n{'='*40}\n[{provider_label} PROMPT SENT]\n{prompt}\n{'='*40}\n")
+    print(f"\n{'='*40}\n[{provider_label} PROMPT SENT]\n{prompt[:500]}...\n{'='*40}\n")
     
     raw_text = ""
     
     # --- API CALL ---
     try:
         if use_ollama:
-            # DIRECT CALL - NO CHECKS - NO ROADBLOCKS
             raw_text = query_ollama_chat(model, prompt)
-            # (Stream printing handled inside query_ollama_chat)
         elif client:
             for attempt in range(3):
                 try:
                     sleep(GEMINI_DELAY)
                     resp = client.models.generate_content(model=model, contents=prompt)
                     raw_text = resp.text
-                    
-                    # --- LOGGING: Raw Response Received ---
-                    print(f"\n{'='*40}\n[GEMINI RESPONSE]\n{raw_text}\n{'='*40}\n")
-                    
                     break
                 except Exception as e:
                     if attempt < 2 and handle_gemini_backoff(str(e)): continue
@@ -1516,10 +1518,17 @@ def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_quer
     except Exception as e:
         return f"EXECUTION ERROR: {e}", [], 0, "None", "None"
 
-    # --- PARSING ---
+    # --- PARSING & CLEANING ---
+    # 1. Remove <think> blocks (DeepSeek/Ollama reasoning)
     text = remove_think_tags(raw_text)
+    
+    # 2. VALIDATE SCORE EXISTENCE
+    # If the AI didn't output the header, it failed to follow instructions or timed out.
+    if "###SCORE###" not in text and "### SCORE ###" not in text:
+        logging.error("AI Output missing ###SCORE### header. Marking as API FAILURE.")
+        return "API FAILURE: No Score Returned", [], 0, "None", "None"
 
-    # Regex using the ### headers from the prompt
+    # 3. Extract Score
     score_matches = re.findall(r"(?:\*\*|)?###\s*SCORE\s*###(?:\*\*|)?\s*(\d+)", text, re.IGNORECASE)
     score = 0
     if score_matches:
@@ -1527,7 +1536,11 @@ def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_quer
             score = int(score_matches[-1])
             if score > 3: score = 3
         except: pass
+    else:
+        # Double check: if header exists but regex failed, default to 0 but warn
+        logging.warning("Header found but could not parse integer score. Defaulting to 0.")
 
+    # 4. Extract Other Fields
     tags_matches = re.findall(r"(?:\*\*|)?###\s*TAGS\s*###(?:\*\*|)?\s*(.*?)(?=\n(?:\*\*|)?###|$)", text, re.DOTALL | re.IGNORECASE)
     tags = []
     if tags_matches:
@@ -1546,8 +1559,7 @@ def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_quer
     possplants_matches = re.findall(r"(?:\*\*|)?###\s*possible_PLANTS\s*###(?:\*\*|)?\s*(.*?)(?=\n(?:\*\*|)?###|$)", text, re.DOTALL | re.IGNORECASE)
     possplants = possplants_matches[-1].strip() if possplants_matches else "None listed"
 
-    # --- BUILD CLEAN REPORT ---
-    # UPDATED: Uses Unicode escape \U0001F9EA for the test tube emoji to prevent SyntaxError
+    # --- BUILD REPORT ---
     substances_display = (
         "\n---\n"
         "**\U0001F9EA Substances & Plants**\n"
@@ -1561,10 +1573,9 @@ def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_quer
 {summary_txt}
 {substances_display}
 """
-    # RETURN TUPLE (5): report, tags, score, chemicals, plants                                                                          
-    return clean_report, tags, score, chemicals, plants    
-    
-    
+    return clean_report, tags, score, chemicals, plants
+
+
 def gemini_abstract_fallback(title, authors_info, current_snippet, model, full_text=None):
     """
     Generates an abstract.
@@ -1652,7 +1663,10 @@ def add_new_sentence():
         st.session_state.semantic_sentences.append((ns, True, True, default_tag))
         st.session_state.new_sentence_input = ""
         save_current_settings()
-                                                                     
+           
+
+
+           
 
 def set_view_expand_all():
     st.session_state.results_view_mode = "expand_all"
@@ -2319,7 +2333,6 @@ if search_mode == "Keyword Search":
         st.slider("✨ Composite Score Min", 0.00, 6.00, value=prefs.get("composite_score_min_value", 0.0), step=0.01, key="composite_score_min_slider", help="Sum of Top 3 Net + Top 3 Raw Semantic Scores")
         # -----------------------------
         
-        # ... (rest of c3 code remains the same)
     with c3:
         with st.expander("➕ Manage Target Tags"):
             for i, cat in enumerate(st.session_state.ai_tag_categories_list):
@@ -2412,11 +2425,10 @@ if search_mode == "Keyword Search":
             current_data.insert(len(current_data.columns), "semantic_sentence", "")
 
         # --- VISUALIZE FAIL FAST STATUS ---
-        # Ensure the column exists in the dataframe
         if "fail_fast_triggered" not in current_data.columns:
             current_data["fail_fast_triggered"] = False
         
-        # Create a visual indicator column based on the flag
+        # Create a visual indicator column
         current_data["Status"] = current_data["fail_fast_triggered"].apply(lambda x: "🛑 LOW YIELD" if x else "✅ Ready")
         # ---------------------------------------
 
@@ -2701,14 +2713,21 @@ def run_cycle_logic(queries):
                     # --- FAIL FAST TRIGGER CHECK ---
                     if query_stats.get('abort'): 
                         st.warning(f"🛑 Fail Fast Triggered for '{query_str}'. Marking as failed.")
-                        # Mark the query in session state so the UI turns red
-                        # We access the global list using the current index
+                        
+                        # 1. Mark the query in session state
                         if q_idx < len(st.session_state.automated_queries):
                             st.session_state.automated_queries[q_idx]['fail_fast_triggered'] = True
-                        st.info("⏭️ Moving to next query.")
+                        
+                        # 2. Advance index so we don't retry this one on reload
+                        st.session_state.cycle_state['query_idx'] = q_idx + 1
+                        st.session_state.cycle_state['paper_offset'] = 0
+                        st.session_state.cycle_state['query_stats'] = {'processed': 0, 'saved': 0, 'bypass_ai': False, 'abort': False}
+                        
+                        # 3. Force Rerun to update UI Red Status immediately
+                        st.rerun()
                         break
             
-            # --- PUBMED LOOP ---    
+            # --- # --- PUBMED LOOP ---    
             if source in ["PubMed", "Both"] and not query_stats.get('abort'):
                  p_res = search_pubmed_paged(final_query, remaining_limit, current_api_offset)
                  total_pubmed = len(p_res)
@@ -2732,11 +2751,21 @@ def run_cycle_logic(queries):
                     # --- FAIL FAST TRIGGER CHECK ---
                     if query_stats.get('abort'): 
                         st.warning(f"🛑 Fail Fast Triggered for '{query_str}'. Marking as failed.")
+                        
+                        # 1. Mark the query in session state
                         if q_idx < len(st.session_state.automated_queries):
                             st.session_state.automated_queries[q_idx]['fail_fast_triggered'] = True
-                        st.info("⏭️ Moving to next query.")
+                        
+                        # 2. Advance index so we don't retry this one on reload
+                        st.session_state.cycle_state['query_idx'] = q_idx + 1
+                        st.session_state.cycle_state['paper_offset'] = 0
+                        st.session_state.cycle_state['query_stats'] = {'processed': 0, 'saved': 0, 'bypass_ai': False, 'abort': False}
+                        
+                        # 3. Force Rerun to update UI Red Status immediately
+                        st.rerun()
                         break
 
+        # --- THIS WAS LIKELY THE PROBLEM AREA ---
         elif search_mode == "Paste citation / page text":
             refs = gemini_extract_from_text(st.session_state.paste_text, actual_model_id)
             papers = []
@@ -2777,7 +2806,6 @@ def run_cycle_logic(queries):
         "active": False, "query_idx": 0, "paper_offset": 0,
         "query_stats": {'processed': 0, 'saved': 0, 'bypass_ai': False, 'abort': False}
     }
-													 
 
 # --- RESULTS AREA ---
 st.markdown("---")
