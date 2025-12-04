@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*- version 2.1 added expand all for printing all results
 import streamlit as st
 import pandas as pd  # Required for the Data Editor
 import requests, json, re, os, io, csv
@@ -1654,6 +1654,19 @@ def add_new_sentence():
         save_current_settings()
                                                                      
 
+def set_view_expand_all():
+    st.session_state.results_view_mode = "expand_all"
+
+def set_view_collapse_all():
+    st.session_state.results_view_mode = "collapse_all"
+
+def set_view_expand_saved():
+    st.session_state.results_view_mode = "expand_saved"
+
+def set_view_expand_others():
+    st.session_state.results_view_mode = "expand_others"
+
+
 def delete_sentence(idx):
     st.session_state.semantic_sentences.pop(idx)
     save_current_settings()
@@ -1936,11 +1949,19 @@ def search_by_url_doi_pdf(url_or_doi):
 # ============================
 
 def _display_paper_details(paper_data, idx_key):
-    """Render a single paper details card matching the provided screenshot design."""
+    """Render a single paper details card with enhanced Tuning/Debug info."""
     paper = paper_data.get('paper', {})
     score = paper_data.get('score', 0)
     tags = paper_data.get('tags', [])
     ai_report_body = paper_data.get('abstract_ai', "")
+    
+    # Retrieve Tuning Data
+    vec_min_used = paper_data.get('vec_min_used', 0.0)
+    comp_min_used = paper_data.get('comp_min_used', 0.0)
+    sem_top3 = paper_data.get('sem_top3', []) 
+    extra_sent = paper_data.get('extra_sent', "")
+    coll_id = paper_data.get('collection_id', "N/A")
+    range_info = paper_data.get('range_info', "N/A")
     
     title = paper.get("title") or "Untitled Paper"
     url = paper.get("url", "#")
@@ -1952,20 +1973,36 @@ def _display_paper_details(paper_data, idx_key):
     # Icon and Expand State
     icon = "✅" if status_msg == "SAVED" else ("🚫" if status_msg == "DUPLICATE" else "⚠️")
     
-    # Construct Header Label (Status + Score + Title + Reason)
-    header_label = f"{icon} [Score: {score}/3] {title}"
+    # --- VIEW STATE LOGIC ---
+    # Default: Saved items are expanded
+    is_expanded = (status_msg == "SAVED")
+    
+    # Override based on button clicks
+    view_mode = st.session_state.get("results_view_mode", "default")
+    
+    if view_mode == "expand_all":
+        is_expanded = True
+    elif view_mode == "collapse_all":
+        is_expanded = False
+    elif view_mode == "expand_saved":
+        is_expanded = (status_msg == "SAVED")
+    elif view_mode == "expand_others":
+        is_expanded = (status_msg != "SAVED")
+    # ------------------------
+
+    header_label = f"{icon} [Score: {score}/3] {title} | [VecMin: {vec_min_used:.2f} | CompMin: {comp_min_used:.2f}]"
+    
     if status_msg != "SAVED" and status_msg != "DUPLICATE":
         header_label += f" | {reason}"
     elif status_msg == "SAVED":
         header_label += " | SAVED"
 
-    # INJECT CSS FOR EXPANDER HEADER (Single line string to prevent SyntaxError)
     st.markdown(
-        "<style>.streamlit-expanderHeader {font-size: 1.2rem !important; font-weight: bold !important;}</style>",
+        "<style>.streamlit-expanderHeader {font-size: 1.1rem !important; font-weight: bold !important;}</style>",
         unsafe_allow_html=True
     )
     
-    with st.expander(header_label, expanded=(status_msg == "SAVED")):
+    with st.expander(header_label, expanded=is_expanded):
         
         # 1. CITATION DATA
         st.markdown("### 1. Citation Data")
@@ -1973,18 +2010,13 @@ def _display_paper_details(paper_data, idx_key):
         st.markdown(f"**DOI:** [{doi}](https://doi.org/{doi})")
         if url: st.markdown(f"**Link:** [Open Source]({url})")
         
-        # 2. ABSTRACTS (Split View: Source Left, AI Right)
+        # 2. ABSTRACTS
         st.markdown("### 2. Abstracts")
-        
         col_src, col_ai = st.columns(2)
-        
         with col_src:
-            # ORIGINAL ABSTRACT ONLY (Unmodified)
             raw_abstract = paper.get('original_abstract', paper.get('snippet', 'No abstract available.'))
-            
             st.caption("Source Abstract")
             st.info(raw_abstract) 
-        
         with col_ai:
             st.caption("AI Abstract Summary")
             if ai_report_body and "Duplicate" not in ai_report_body:
@@ -1994,37 +2026,54 @@ def _display_paper_details(paper_data, idx_key):
         
         # 3. CATEGORIZATION
         st.markdown("### 3. Categorization")
-        
-        # --- FIX: ROBUST TAG HANDLING ---
-        # Semantic search adds tuples: (Tag, Sentence). We must extract just the Tag.
         safe_tags = []
         if tags:
             for t in tags:
                 if isinstance(t, tuple) and len(t) > 0:
-                    safe_tags.append(str(t[0])) # Extract tag name from tuple
+                    safe_tags.append(str(t[0])) 
                 elif t:
-                    safe_tags.append(str(t)) # Handle normal strings
-        
+                    safe_tags.append(str(t))
         st.markdown(f"**Tags:** {', '.join(safe_tags) if safe_tags else 'None detected'}")
-        # -------------------------------
         
+        # 4. TUNING & DEBUG INFO
+        st.markdown("---")
+        st.markdown("### 4. Tuning & Debug Info")
+        t1, t2, t3 = st.columns(3)
+        t1.caption(f"**Collection:** {coll_id}")
+        t2.caption(f"**Range:** {range_info}")
+        t3.caption(f"**Extra Sentence:** {extra_sent if extra_sent else 'None'}")
+        
+        if sem_top3:
+            st.caption("**Top 3 Zero-Shot Matches:**")
+            for i, item in enumerate(sem_top3):
+                if len(item) >= 4:
+                    net, raw, tag, sent = item
+                    st.text(f"{i+1}. [Net: {net:.3f} | Raw: {raw:.3f}] {tag} \n   \"{sent}\"")
+        else:
+            st.text("No semantic matches found.")
+
         # ACTIONS
         st.markdown("---")
         if st.button("📤 Upload to Zotero", key=f"btn_save_{idx_key}"):
-            # Sanitize tags: Ensure string type and truncate to limit
             clean_tags = []
             for t in tags:
-                if isinstance(t, str):
-                    clean_tags.append({"tag": t[:MAX_TAG_LENGTH]})
-                elif isinstance(t, tuple) and len(t) > 0:
-                    # Handle accidental tuple tags from semantic search
-                    clean_tags.append({"tag": str(t[0])[:MAX_TAG_LENGTH]})
+                if isinstance(t, str): clean_tags.append({"tag": t[:MAX_TAG_LENGTH]})
+                elif isinstance(t, tuple) and len(t) > 0: clean_tags.append({"tag": str(t[0])[:MAX_TAG_LENGTH]})
             
+            tuning_text = f"\n\n[TUNING REPORT]\nCollection: {coll_id}\nRange: {range_info}\nVecMin: {vec_min_used} | CompMin: {comp_min_used}\n"
+            if extra_sent: tuning_text += f"Extra Sent: {extra_sent}\n"
+            if sem_top3:
+                tuning_text += "Top Matches:\n"
+                for item in sem_top3:
+                    if len(item) >= 4: tuning_text += f"- {item[2]} (Net:{item[0]:.3f}): {item[3]}\n"
+
+            final_abstract = (paper.get("original_abstract") or paper.get("snippet"))[:ZOTERO_MAX_ABSTRACT_CHARS] + tuning_text
+
             item = {
                 "itemType": "journalArticle",
                 "title": paper.get("title"),
                 "creators": parse_authors(paper.get("authors_info")),
-                "abstractNote": (paper.get("original_abstract") or paper.get("snippet"))[:ZOTERO_MAX_ABSTRACT_CHARS],
+                "abstractNote": final_abstract,
                 "date": str(paper.get("year") or ""),
                 "tags": clean_tags,
                 "url": with_ntu_proxy(doi or paper.get("url")),
@@ -2035,52 +2084,49 @@ def _display_paper_details(paper_data, idx_key):
             if ok: st.toast(f"✅ Saved to Zotero: {title}")
             else: st.error(f"Zotero Error: {msg}")
 
-def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_ph, prog_ph, query_stats, collection_override=None, vec_min_override=None, composite_min_override=None):
+def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_ph, prog_ph, query_stats, collection_override=None, vec_min_override=None, composite_min_override=None, extra_semantic_sentence=None, start_rec=0, stop_rec=0):
     annotated = 0
     saved = 0
     
-    # Determine which collection to use
     target_collection = collection_override if collection_override else st.session_state.user_zotero_collection
-
-    # UI Settings
     min_len = st.session_state.abstract_length_slider
     z_thresh = st.session_state.min_score3_slider
     
-    # Vector Min resolution
     if vec_min_override is not None:
         vec_min = float(vec_min_override)
     else:
         vec_min = st.session_state.vector_score_min_slider
 
-    # Composite Min resolution
     comp_min = float(composite_min_override) if composite_min_override is not None else 0.0
     
-    # Filter Config
     req_vals = [v.lower() for v in st.session_state.ai_tag_post_filter_values]
     suggested_tags = st.session_state.selected_tag_categories
     
-    # Speed Up Settings
     enable_speedup = st.session_state.enable_speedup_checkbox
     speedup_threshold = st.session_state.speedup_threshold_slider
     skip_low_yield = st.session_state.get("skip_low_yield_checkbox", False)
     
-    # AI Model Resolution
     if st.session_state.get("use_ollama"):
         actual_model_id = st.session_state.get("ollama_local_model_selector", "llama3")
     else:
         selected_key = st.session_state.model_key_selector
         actual_model_id = MODEL_OPTIONS[selected_key]["model_id"]
     
-    # Context
     topics_context = st.session_state.get("topics_txt", "")
     
-    # 1. Preranking (Calculate Vector Scores)
+    # 1. Preranking
     sem_model = get_embedding_model()
     if sem_model:
         chunk = prerank_papers(chunk, query, sem_model)
-        # --- CRITICAL CHANGE: DO NOT DROP PAPERS HERE ---
-        # We removed the early "Vector Filter" block. 
-        # All papers proceed to the loop so we can calculate Composite Scores.
+        original_count = len(chunk)
+        
+        # Filter 1: Vector Score
+        if vec_min > 0.0:
+            chunk = [p for p in chunk if p.get('vector_score', 0) >= vec_min]
+            
+        dropped_vec = original_count - len(chunk)
+        if dropped_vec > 0:
+            print(f"[INFO] Vector Filter: Dropped {dropped_vec} papers (Vector Score < {vec_min})")
 
     if not chunk: return 0, 0
 
@@ -2136,28 +2182,20 @@ def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_
             tags.extend(stags)
 
         # 7. Qualification Logic
-        
-        # --- CALCULATE COMPOSITE SCORE ---
         current_composite_score = 0.0
         if sem_tags_results:
             for item in sem_tags_results:
                 current_composite_score += (item[0] + item[1]) # Net + Raw
         
-        # --- CONSOLE LOGGING ---
         v_score = paper.get('vector_score', 0.0)
         print(f"   [PAPER] {paper.get('title')[:40]}... | Vector: {v_score:.4f} (Min: {vec_min}) | Composite: {current_composite_score:.4f} (Min: {comp_min})")
         
-        # --- FILTER LOGIC ---
-        # 1. Check Vector Filter
         vector_pass = (v_score >= vec_min)
-        
-        # 2. Check Composite Filter (Only if slider > 0)
         composite_pass = True
         if comp_min > 0.0:
             if current_composite_score < comp_min:
                 composite_pass = False
         
-        # 3. Check Value Filters
         passes_value_filter = True
         if req_vals:
             search_text = (str(paper.get("title", "")) + " " + str(paper.get("original_abstract", "")) + " " + str(snip) + " " + str(ai_abs) + " " + " ".join([str(t) for t in tags])).lower()
@@ -2169,16 +2207,6 @@ def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_
             
         if is_dup:
             status_msg = "DUPLICATE"
-        
-        # FINAL DECISION:
-        # To be saved, it must:
-        # A. Pass Value Filters AND
-        # B. (Pass Vector Filter OR Pass Composite Filter) AND
-        # C. (Have High AI Score OR be Auto-Saved)
-        
-        # Note: If you want strict AND logic (must pass both), change 'or' to 'and' below.
-        # Currently implemented as "Rescue" logic: High Composite can save a Low Vector paper.
-        
         elif not passes_value_filter:
             reason = "Failed Value Filter"
         elif not (vector_pass or composite_pass):
@@ -2193,11 +2221,23 @@ def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_
                     if isinstance(t, str): clean_tags.append({"tag": t[:MAX_TAG_LENGTH]})
                     elif isinstance(t, tuple) and len(t) > 0: clean_tags.append({"tag": str(t[0])[:MAX_TAG_LENGTH]})
                 
+                # --- PREPARE ZOTERO PAYLOAD WITH TUNING INFO ---
+                tuning_text = f"\n\n[TUNING REPORT]\nCollection: {target_collection}\nRange: {start_rec}-{stop_rec}\nVecMin: {vec_min} | CompMin: {comp_min}\n"
+                if extra_semantic_sentence: tuning_text += f"Extra Sent: {extra_semantic_sentence}\n"
+                if sem_tags_results:
+                    tuning_text += "Top Matches:\n"
+                    for item in sem_tags_results:
+                        # item is (Net, Raw, Tag, Sentence)
+                        if len(item) >= 4: tuning_text += f"- {item[2]} (Net:{item[0]:.3f}): {item[3]}\n"
+
+                final_abstract = (paper.get("original_abstract") or snip)[:ZOTERO_MAX_ABSTRACT_CHARS] + tuning_text
+                # -----------------------------------------------
+
                 item = {
                     "itemType": "journalArticle",
                     "title": paper.get("title"),
                     "creators": parse_authors(paper.get("authors_info")),
-                    "abstractNote": (paper.get("original_abstract") or snip)[:ZOTERO_MAX_ABSTRACT_CHARS],
+                    "abstractNote": final_abstract,
                     "date": str(paper.get("year") or ""),
                     "tags": clean_tags,
                     "url": with_ntu_proxy(doi or paper.get("url")),
@@ -2226,18 +2266,28 @@ def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_
                     break
 
         duration = time() - start_time
+        
+        # --- BUNDLE DATA FOR UI REPORT ---
         result_entry = {
             'paper': paper, 'score': score, 'tags': tags, 'abstract_ai': ai_abs,
             'z_thresh': z_thresh, 'passes': passes_value_filter, 'status_msg': status_msg,
-            'process_time': duration, 'reason': reason
+            'process_time': duration, 'reason': reason,
+            # New Fields for UI
+            'vec_min_used': vec_min,
+            'comp_min_used': comp_min,
+            'sem_top3': sem_tags_results,
+            'extra_sent': extra_semantic_sentence,
+            'collection_id': target_collection,
+            'range_info': f"{start_rec} - {stop_rec}"
         }
+        # ---------------------------------
+        
         st.session_state.results_history.append(result_entry)
         _display_paper_details(result_entry, len(st.session_state.results_history))
         prog_ph.progress(int((idx / total_papers) * 100) if total_papers else 0)
         st.session_state.cycle_state['paper_offset'] += 1
 
     return annotated, saved
-
 
 # ============================
 # GUI LAYOUT
@@ -2362,10 +2412,11 @@ if search_mode == "Keyword Search":
             current_data.insert(len(current_data.columns), "semantic_sentence", "")
 
         # --- VISUALIZE FAIL FAST STATUS ---
+        # Ensure the column exists in the dataframe
         if "fail_fast_triggered" not in current_data.columns:
             current_data["fail_fast_triggered"] = False
         
-        # Create a visual indicator column
+        # Create a visual indicator column based on the flag
         current_data["Status"] = current_data["fail_fast_triggered"].apply(lambda x: "🛑 LOW YIELD" if x else "✅ Ready")
         # ---------------------------------------
 
@@ -2545,7 +2596,6 @@ def run_cycle_logic(queries):
     total_ann = 0
     total_save = 0
     
-    # --- RESOLVE MODEL ID (GEMINI vs OLLAMA) ---
     if st.session_state.get("use_ollama"):
         actual_model_id = st.session_state.get("ollama_local_model_selector", "llama3")
     else:
@@ -2560,17 +2610,14 @@ def run_cycle_logic(queries):
         raw_item = queries[q_idx]
         
         if isinstance(raw_item, dict):
-            # --- AUTOMATED CYCLE MODE ---
             query_str = raw_item.get("query", "")
             
-            # 1. Vector Min: Look for 'vector_min'. If missing, fallback to global slider.
             val_vec = raw_item.get("vector_min")
             if val_vec is not None and str(val_vec).strip() != "":
                 row_vec_min = float(val_vec)
             else:
                 row_vec_min = st.session_state.vector_score_min_slider
 
-            # 2. Composite Min: Look for 'semantic_threshold'. If missing, fallback to global slider.
             val_comp = raw_item.get("semantic_threshold")
             if val_comp is not None and str(val_comp).strip() != "":
                 row_composite_min = float(val_comp)
@@ -2580,15 +2627,16 @@ def run_cycle_logic(queries):
             row_start = int(raw_item.get("start_rec", 0))
             row_stop = int(raw_item.get("stop_rec", 12))
             folder_override = raw_item.get("folder", "").strip()
+            row_semantic_sentence = raw_item.get("semantic_sentence", "").strip()
             
         else:
-            # --- MANUAL / SINGLE QUERY MODE ---
             query_str = str(raw_item)
             row_vec_min = st.session_state.vector_score_min_slider
             row_composite_min = st.session_state.get("composite_score_min_slider", 0.0)
             row_start = 0
             row_stop = st.session_state.max_results_slider
             folder_override = ""
+            row_semantic_sentence = ""
         
         if not folder_override and query_str in query_map:
             folder_override = query_map[query_str].get('folder', "").strip()
@@ -2601,7 +2649,6 @@ def run_cycle_logic(queries):
             st.warning(f"Skipping empty query at index {q_idx}")
             continue
 
-        # Initialize stats and ABORT FLAG
         query_stats = st.session_state.cycle_state.get('query_stats', {
             'processed': 0, 'saved': 0, 'bypass_ai': False, 'abort': False
         })
@@ -2616,7 +2663,6 @@ def run_cycle_logic(queries):
         
         if q_idx != start_q_idx: 
             st.session_state.cycle_state['paper_offset'] = 0
-            # Reset stats (including abort flag) for new query
             st.session_state.cycle_state['query_stats'] = {'processed': 0, 'saved': 0, 'bypass_ai': False, 'abort': False}
             query_stats = st.session_state.cycle_state['query_stats']
             current_api_offset = row_start
@@ -2645,7 +2691,10 @@ def run_cycle_logic(queries):
                         chunk, final_query, 100, 0, status, prog, query_stats, 
                         collection_override=folder_override, 
                         vec_min_override=row_vec_min,
-                        composite_min_override=row_composite_min
+                        composite_min_override=row_composite_min,
+                        extra_semantic_sentence=row_semantic_sentence,
+                        start_rec=row_start,
+                        stop_rec=row_stop
                     )
                     total_ann += a; total_save += s
                     
@@ -2653,6 +2702,7 @@ def run_cycle_logic(queries):
                     if query_stats.get('abort'): 
                         st.warning(f"🛑 Fail Fast Triggered for '{query_str}'. Marking as failed.")
                         # Mark the query in session state so the UI turns red
+                        # We access the global list using the current index
                         if q_idx < len(st.session_state.automated_queries):
                             st.session_state.automated_queries[q_idx]['fail_fast_triggered'] = True
                         st.info("⏭️ Moving to next query.")
@@ -2671,7 +2721,10 @@ def run_cycle_logic(queries):
                         batch, final_query, total_pubmed, pubmed_processed_count, 
                         status, prog, query_stats, collection_override=folder_override, 
                         vec_min_override=row_vec_min,
-                        composite_min_override=row_composite_min
+                        composite_min_override=row_composite_min,
+                        extra_semantic_sentence=row_semantic_sentence,
+                        start_rec=row_start,
+                        stop_rec=row_stop
                     )
                     total_ann += a; total_save += s
                     pubmed_processed_count += len(batch)
@@ -2679,7 +2732,6 @@ def run_cycle_logic(queries):
                     # --- FAIL FAST TRIGGER CHECK ---
                     if query_stats.get('abort'): 
                         st.warning(f"🛑 Fail Fast Triggered for '{query_str}'. Marking as failed.")
-                        # Mark the query in session state so the UI turns red
                         if q_idx < len(st.session_state.automated_queries):
                             st.session_state.automated_queries[q_idx]['fail_fast_triggered'] = True
                         st.info("⏭️ Moving to next query.")
@@ -2697,16 +2749,12 @@ def run_cycle_logic(queries):
                     if p: papers.append(p[0])
             if papers:
                 a, s = process_chunk_and_save(
-                    papers, 
-                    final_query, 
-                    len(papers), 
-                    0, 
-                    status, 
-                    prog, 
-                    query_stats, 
-                    collection_override=folder_override,
+                    papers, final_query, len(papers), 0, status, prog, query_stats, 
+                    collection_override=folder_override, 
                     vec_min_override=row_vec_min,
-                    composite_min_override=row_composite_min
+                    composite_min_override=row_composite_min,
+                    extra_semantic_sentence=row_semantic_sentence,
+                    start_rec=row_start, stop_rec=row_stop
                 )
                 total_ann += a; total_save += s
 
@@ -2714,16 +2762,12 @@ def run_cycle_logic(queries):
             papers = search_by_url_doi_pdf(st.session_state.url_or_doi)
             if papers:
                 a, s = process_chunk_and_save(
-                    papers, 
-                    final_query, 
-                    len(papers), 
-                    0, 
-                    status, 
-                    prog, 
-                    query_stats, 
-                    collection_override=folder_override,
+                    papers, final_query, len(papers), 0, status, prog, query_stats, 
+                    collection_override=folder_override, 
                     vec_min_override=row_vec_min,
-                    composite_min_override=row_composite_min
+                    composite_min_override=row_composite_min,
+                    extra_semantic_sentence=row_semantic_sentence,
+                    start_rec=row_start, stop_rec=row_stop
                 )
                 total_ann += a; total_save += s
 
@@ -2733,13 +2777,20 @@ def run_cycle_logic(queries):
         "active": False, "query_idx": 0, "paper_offset": 0,
         "query_stats": {'processed': 0, 'saved': 0, 'bypass_ai': False, 'abort': False}
     }
-															 
+													 
 
 # --- RESULTS AREA ---
 st.markdown("---")
 st.subheader("📝 Results Log (Persists across runs)")
 
-                               
+# --- NEW: VIEW CONTROLS ---
+v1, v2, v3, v4 = st.columns(4)
+v1.button("➕ Expand All", on_click=set_view_expand_all, use_container_width=True)
+v2.button("➖ Collapse All", on_click=set_view_collapse_all, use_container_width=True)
+v3.button("✅ Expand Saved", on_click=set_view_expand_saved, use_container_width=True)
+v4.button("⚠️ Expand Rejected", on_click=set_view_expand_others, use_container_width=True)
+# --------------------------
+
 if st.session_state.results_history:
     # Use unique index key for correct display in history
     for idx, item in enumerate(st.session_state.results_history):
@@ -2755,6 +2806,9 @@ is_active = st.session_state.cycle_state['active']
 with c_go:
     label = "▶️ Resume Cycle" if is_active else "🚀 Go"
     if st.button(label):
+        # ... (Keep your existing Go button logic here) ...
+        # (I am omitting the full Go button logic block for brevity, 
+        #  but ensure you keep the code you already have inside c_go)
         valid_go = True
         qs = []
         if search_mode == "Keyword Search" and st.session_state.query_mode_selector == "Single Query":
@@ -2762,15 +2816,13 @@ with c_go:
                  st.error("Please enter a topic.")
                  valid_go = False
              else:
-                 # --- FIX: Pass BOTH sliders into the dictionary ---
                  qs = [{
                     'query': st.session_state.user_prompt_input,
-                    'vector_min': st.session_state.vector_score_min_slider,       # Correctly maps Vector Slider
-                    'semantic_threshold': st.session_state.composite_score_min_slider, # Correctly maps Composite Slider
+                    'vector_min': st.session_state.vector_score_min_slider,       
+                    'semantic_threshold': st.session_state.composite_score_min_slider, 
                     'start_rec': 0,
                     'stop_rec': st.session_state.get('max_results_slider', 20)
                  }]
-                 # ------------------------------------------------
         elif search_mode == "Keyword Search":
             if not st.session_state.automated_queries:
                 st.error("No queries in table.")
@@ -2789,8 +2841,6 @@ with c_go:
 with c_pause:
     if st.button("⏸️ Pause"):
         st.warning("Cycle Paused. You can adjust settings and click Resume.")
-        # No st.stop() needed, just don't trigger start_run. 
-        # State remains 'active' so Resume appears.
 
 with c_reset:
     if is_active:
