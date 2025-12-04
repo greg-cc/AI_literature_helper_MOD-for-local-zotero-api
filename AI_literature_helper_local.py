@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*- version 2.1.1 changed ai instructions to infer subject matter.
+# -*- coding: utf-8 -*- version 2.2   History Recall
 import streamlit as st
 import pandas as pd  # Required for the Data Editor
 import requests, json, re, os, io, csv
@@ -442,6 +442,27 @@ if "ai_tag_post_filter_values" not in st.session_state:
 # ============================
 # CORE UTILITY FUNCTIONS
 # ============================
+
+def save_cycle_results_to_disk(query_str, results):
+    """Saves the results of a specific cycle to a JSON file."""
+    if not os.path.exists("saved_results"):
+        os.makedirs("saved_results")
+    
+    # Create a filename with timestamp and query
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    safe_query = "".join([c for c in query_str if c.isalpha() or c.isdigit() or c==' ']).strip().replace(" ", "_")
+    filename = f"saved_results/{timestamp}_{safe_query}.json"
+    
+    try:
+        with open(filename, "w", encoding='utf-8') as f:
+            json.dump(results, f, indent=2, default=str)
+        logging.info(f"✅ Saved cycle results to {filename}")
+    except Exception as e:
+        logging.error(f"Failed to save cycle results: {e}")
+
+
+
+
 
 def _request_json_with_retries(url, *, method="GET", headers=None, params=None, data=None, tries=4, timeout=40):
     """
@@ -1511,24 +1532,26 @@ def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_quer
                     break
                 except Exception as e:
                     if attempt < 2 and handle_gemini_backoff(str(e)): continue
-                    return f"API FAILURE: {e}", [], 0, "None", "None"
+                    # ERROR PATH 1: Return 6 values
+                    return f"API FAILURE: {e}", [], 0, "None", "None", "None"
         else:
-            return "API KEY MISSING", [], 0, "None", "None"
+            # ERROR PATH 2: Return 6 values
+            return "API KEY MISSING", [], 0, "None", "None", "None"
 
     except Exception as e:
-        return f"EXECUTION ERROR: {e}", [], 0, "None", "None"
+        # ERROR PATH 3: Return 6 values
+        return f"EXECUTION ERROR: {e}", [], 0, "None", "None", "None"
 
     # --- PARSING & CLEANING ---
-    # 1. Remove <think> blocks (DeepSeek/Ollama reasoning)
     text = remove_think_tags(raw_text)
     
-    # 2. VALIDATE SCORE EXISTENCE
-    # If the AI didn't output the header, it failed to follow instructions or timed out.
+    # VALIDATE SCORE EXISTENCE
     if "###SCORE###" not in text and "### SCORE ###" not in text:
         logging.error("AI Output missing ###SCORE### header. Marking as API FAILURE.")
-        return "API FAILURE: No Score Returned", [], 0, "None", "None"
+        # ERROR PATH 4: Return 6 values
+        return "API FAILURE: No Score Returned", [], 0, "None", "None", "None"
 
-    # 3. Extract Score
+    # Extract Score
     score_matches = re.findall(r"(?:\*\*|)?###\s*SCORE\s*###(?:\*\*|)?\s*(\d+)", text, re.IGNORECASE)
     score = 0
     if score_matches:
@@ -1537,10 +1560,9 @@ def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_quer
             if score > 3: score = 3
         except: pass
     else:
-        # Double check: if header exists but regex failed, default to 0 but warn
         logging.warning("Header found but could not parse integer score. Defaulting to 0.")
 
-    # 4. Extract Other Fields
+    # Extract Other Fields
     tags_matches = re.findall(r"(?:\*\*|)?###\s*TAGS\s*###(?:\*\*|)?\s*(.*?)(?=\n(?:\*\*|)?###|$)", text, re.DOTALL | re.IGNORECASE)
     tags = []
     if tags_matches:
@@ -1573,7 +1595,8 @@ def gemini_annotate_paper(title, authors_info, snippet, pdf_text, url, user_quer
 {summary_txt}
 {substances_display}
 """
-    return clean_report, tags, score, chemicals, plants
+    # SUCCESS PATH: Return 6 values
+    return clean_report, tags, score, chemicals, plants, possplants
 
 
 def gemini_abstract_fallback(title, authors_info, current_snippet, model, full_text=None):
@@ -1587,7 +1610,7 @@ def gemini_abstract_fallback(title, authors_info, current_snippet, model, full_t
     # LOGIC CHANGE: Use full text if available
     if full_text and len(full_text) > 500:
         prompt = f"""
-        Summarize the following academic text into a concise abstract (approx 150 words).
+        Summarize the following academic text into a concise abstract (approx 150 to 250 words).
         Focus on the objectives, methods, and results.
         
         TEXT SOURCE:
@@ -2098,6 +2121,7 @@ def _display_paper_details(paper_data, idx_key):
             if ok: st.toast(f"✅ Saved to Zotero: {title}")
             else: st.error(f"Zotero Error: {msg}")
 
+
 def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_ph, prog_ph, query_stats, collection_override=None, vec_min_override=None, composite_min_override=None, extra_semantic_sentence=None, start_rec=0, stop_rec=0):
     annotated = 0
     saved = 0
@@ -2132,15 +2156,7 @@ def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_
     sem_model = get_embedding_model()
     if sem_model:
         chunk = prerank_papers(chunk, query, sem_model)
-        original_count = len(chunk)
-        
-        # Filter 1: Vector Score
-        if vec_min > 0.0:
-            chunk = [p for p in chunk if p.get('vector_score', 0) >= vec_min]
-            
-        dropped_vec = original_count - len(chunk)
-        if dropped_vec > 0:
-            print(f"[INFO] Vector Filter: Dropped {dropped_vec} papers (Vector Score < {vec_min})")
+        # No early drop here, allowing Composite Score to rescue papers
 
     if not chunk: return 0, 0
 
@@ -2176,18 +2192,50 @@ def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_
 
         # 5. AI Annotation & Semantic Scoring
         sem_tags_results = [] 
+        # Initialize variables to ensure scope safety
+        ai_abs, tags, score, chemicals, plants, possplants = "", [], 0, "None", "None", "None"
+
         if is_dup:
             ai_abs, tags, score, chemicals, plants = "Duplicate", [], 0, "None", "None"
+            possplants = "None"
         elif bypass_ai:
             ai_abs, tags, score, chemicals, plants = "Auto-Saved", ["Speed-Save"], 3, "Skipped", "Skipped"
+            possplants = "Skipped"
         else:
-            ai_abs, tags, score, chemicals, plants = gemini_annotate_paper(
+            # Note: gemini_annotate_paper returns 5 values. We need to update it to return possplants or handle it here.
+            # Wait, looking at previous code, gemini_annotate_paper returns 5 values: report, tags, score, chemicals, plants.
+            # The 'possplants' is actually embedded in the 'report' string but not returned as a variable in the tuple.
+            # WE NEED TO EXTRACT IT FROM THE REPORT OR UPDATE THE FUNCTION.
+            # However, based on your screenshot, the UI *is* displaying it, which means it's likely being parsed somewhere.
+            
+            # Let's look at how gemini_annotate_paper was defined in the previous turn.
+            # It returns: return clean_report, tags, score, chemicals, plants
+            # It DOES NOT return possplants as a separate variable.
+            
+            # TO FIX THIS PROPERLY without changing the function signature everywhere else immediately:
+            # We will re-parse the 'possplants' from the raw text inside gemini_annotate_paper if we modify it, 
+            # OR we can just check the 'clean_report' string for the content.
+            
+            # ACTUALLY, the cleanest way is to update gemini_annotate_paper to return 6 values.
+            # But since I cannot see the full context of where else it is called, I will assume it is only called here.
+            
+            # Let's update the call to unpack 5 values, and then extract possplants from the report text if needed,
+            # OR better yet, let's update gemini_annotate_paper to return it.
+            
+            # Since I provided the updated gemini_annotate_paper code previously, I will assume we can modify it.
+            # BUT, to be safe and quick, I will modify gemini_annotate_paper to return 6 values, 
+            # and update this call to accept 6 values.
+            
+            # WAIT - I see in my previous response I updated gemini_annotate_paper to return 5 values.
+            # I will update gemini_annotate_paper below to return 6, and update this call.
+            
+            ai_abs, tags, score, chemicals, plants, possplants = gemini_annotate_paper(
                 paper.get("title"), paper.get("authors_info"), snip, full_text_context, paper.get("url"), query, actual_model_id,
                 suggested_tags=suggested_tags, priority_topics=topics_context
             )
+            
             if "API FAILURE" not in ai_abs: 
                 annotated += 1
-                # Calculate Semantics (Top 3)
                 sem_tags_results = generate_semantic_tags(ai_abs if not bypass_ai else snip, st.session_state.semantic_sentences, sem_model, top_n=3)
 
         # 6. Semantic Tags Display
@@ -2199,7 +2247,7 @@ def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_
         current_composite_score = 0.0
         if sem_tags_results:
             for item in sem_tags_results:
-                current_composite_score += (item[0] + item[1]) # Net + Raw
+                current_composite_score += (item[0] + item[1]) 
         
         v_score = paper.get('vector_score', 0.0)
         print(f"   [PAPER] {paper.get('title')[:40]}... | Vector: {v_score:.4f} (Min: {vec_min}) | Composite: {current_composite_score:.4f} (Min: {comp_min})")
@@ -2217,7 +2265,18 @@ def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_
 
         status_msg = "SKIPPED"
         reason = ""
-        substance_rejected = ("none" in chemicals.lower() and "none" in plants.lower())
+        
+        # --- UPDATED SUBSTANCE FILTER LOGIC ---
+        # Check all three fields. If ALL are "none", then reject.
+        # If ANY of them contain something other than "none", keep it.
+        has_chems = "none" not in chemicals.lower()
+        has_plants = "none" not in plants.lower()
+        has_poss = "none" not in possplants.lower()
+        
+        substance_rejected = False
+        if not (has_chems or has_plants or has_poss):
+            substance_rejected = True
+        # --------------------------------------
             
         if is_dup:
             status_msg = "DUPLICATE"
@@ -2235,17 +2294,14 @@ def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_
                     if isinstance(t, str): clean_tags.append({"tag": t[:MAX_TAG_LENGTH]})
                     elif isinstance(t, tuple) and len(t) > 0: clean_tags.append({"tag": str(t[0])[:MAX_TAG_LENGTH]})
                 
-                # --- PREPARE ZOTERO PAYLOAD WITH TUNING INFO ---
                 tuning_text = f"\n\n[TUNING REPORT]\nCollection: {target_collection}\nRange: {start_rec}-{stop_rec}\nVecMin: {vec_min} | CompMin: {comp_min}\n"
                 if extra_semantic_sentence: tuning_text += f"Extra Sent: {extra_semantic_sentence}\n"
                 if sem_tags_results:
                     tuning_text += "Top Matches:\n"
                     for item in sem_tags_results:
-                        # item is (Net, Raw, Tag, Sentence)
                         if len(item) >= 4: tuning_text += f"- {item[2]} (Net:{item[0]:.3f}): {item[3]}\n"
 
                 final_abstract = (paper.get("original_abstract") or snip)[:ZOTERO_MAX_ABSTRACT_CHARS] + tuning_text
-                # -----------------------------------------------
 
                 item = {
                     "itemType": "journalArticle",
@@ -2281,12 +2337,10 @@ def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_
 
         duration = time() - start_time
         
-        # --- BUNDLE DATA FOR UI REPORT ---
         result_entry = {
             'paper': paper, 'score': score, 'tags': tags, 'abstract_ai': ai_abs,
             'z_thresh': z_thresh, 'passes': passes_value_filter, 'status_msg': status_msg,
             'process_time': duration, 'reason': reason,
-            # New Fields for UI
             'vec_min_used': vec_min,
             'comp_min_used': comp_min,
             'sem_top3': sem_tags_results,
@@ -2294,7 +2348,6 @@ def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_
             'collection_id': target_collection,
             'range_info': f"{start_rec} - {stop_rec}"
         }
-        # ---------------------------------
         
         st.session_state.results_history.append(result_entry)
         _display_paper_details(result_entry, len(st.session_state.results_history))
@@ -2302,6 +2355,7 @@ def process_chunk_and_save(chunk, query, total_papers, papers_processed, status_
         st.session_state.cycle_state['paper_offset'] += 1
 
     return annotated, saved
+
 
 # ============================
 # GUI LAYOUT
@@ -2585,6 +2639,29 @@ with st.sidebar:
         run_vector_tuning_report()
     
     st.markdown("---")
+    st.markdown("### 📂 History Viewer")
+    
+    # 1. List Files
+    if not os.path.exists("saved_results"):
+        os.makedirs("saved_results")
+    
+    history_files = sorted([f for f in os.listdir("saved_results") if f.endswith(".json")], reverse=True)
+    
+    selected_history = st.selectbox("Select Past Cycle", [""] + history_files, key="history_file_selector")
+    
+    if st.button("📜 Load Selected History"):
+        if selected_history:
+            try:
+                path = os.path.join("saved_results", selected_history)
+                with open(path, "r", encoding='utf-8') as f:
+                    loaded_data = json.load(f)
+                
+                # Load into session state to display in main window
+                st.session_state.results_history = loaded_data
+                st.toast(f"Loaded {len(loaded_data)} items from history.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error loading file: {e}")
 
     st.checkbox("📥 Add to Zotero", key="add_to_zotero_state", value=prefs.get("add_to_zotero_state_value", True))
     st.checkbox("⚠️ Allow Duplicates", key="allow_duplicates", value=prefs.get("allow_duplicates", False))
@@ -2607,6 +2684,11 @@ def run_cycle_logic(queries):
     
     total_ann = 0
     total_save = 0
+    
+    # --- INJECT THICK BLACK LINE (SEPARATOR) FOR NEW RUN ---
+    # We only add this once per "Go" click
+    st.session_state.results_history.append({'type': 'separator'})
+    # -------------------------------------------------------
     
     if st.session_state.get("use_ollama"):
         actual_model_id = st.session_state.get("ollama_local_model_selector", "llama3")
@@ -2661,6 +2743,26 @@ def run_cycle_logic(queries):
             st.warning(f"Skipping empty query at index {q_idx}")
             continue
 
+        # --- INJECT CYCLE HEADER (BIG LETTERS + SETTINGS) ---
+        header_entry = {
+            'type': 'cycle_header',
+            'query': query_str,
+            'settings': {
+                'vec_min': f"{row_vec_min:.2f}",
+                'comp_min': f"{row_composite_min:.2f}",
+                'start': row_start,
+                'stop': row_stop,
+                'source': st.session_state.search_source_selector,
+                'model': actual_model_id.split("/")[-1][:15] + "...", # Truncate for display
+                'speedup': st.session_state.enable_speedup_checkbox,
+                'failfast': st.session_state.get("skip_low_yield_checkbox", False),
+                'collection': folder_override if folder_override else "Default",
+                'mode': search_mode
+            }
+        }
+        st.session_state.results_history.append(header_entry)
+        # ----------------------------------------------------
+
         query_stats = st.session_state.cycle_state.get('query_stats', {
             'processed': 0, 'saved': 0, 'bypass_ai': False, 'abort': False
         })
@@ -2710,24 +2812,17 @@ def run_cycle_logic(queries):
                     )
                     total_ann += a; total_save += s
                     
-                    # --- FAIL FAST TRIGGER CHECK ---
                     if query_stats.get('abort'): 
                         st.warning(f"🛑 Fail Fast Triggered for '{query_str}'. Marking as failed.")
-                        
-                        # 1. Mark the query in session state
                         if q_idx < len(st.session_state.automated_queries):
                             st.session_state.automated_queries[q_idx]['fail_fast_triggered'] = True
-                        
-                        # 2. Advance index so we don't retry this one on reload
                         st.session_state.cycle_state['query_idx'] = q_idx + 1
                         st.session_state.cycle_state['paper_offset'] = 0
                         st.session_state.cycle_state['query_stats'] = {'processed': 0, 'saved': 0, 'bypass_ai': False, 'abort': False}
-                        
-                        # 3. Force Rerun to update UI Red Status immediately
                         st.rerun()
                         break
             
-            # --- # --- PUBMED LOOP ---    
+            # --- PUBMED LOOP ---    
             if source in ["PubMed", "Both"] and not query_stats.get('abort'):
                  p_res = search_pubmed_paged(final_query, remaining_limit, current_api_offset)
                  total_pubmed = len(p_res)
@@ -2748,24 +2843,16 @@ def run_cycle_logic(queries):
                     total_ann += a; total_save += s
                     pubmed_processed_count += len(batch)
                     
-                    # --- FAIL FAST TRIGGER CHECK ---
                     if query_stats.get('abort'): 
                         st.warning(f"🛑 Fail Fast Triggered for '{query_str}'. Marking as failed.")
-                        
-                        # 1. Mark the query in session state
                         if q_idx < len(st.session_state.automated_queries):
                             st.session_state.automated_queries[q_idx]['fail_fast_triggered'] = True
-                        
-                        # 2. Advance index so we don't retry this one on reload
                         st.session_state.cycle_state['query_idx'] = q_idx + 1
                         st.session_state.cycle_state['paper_offset'] = 0
                         st.session_state.cycle_state['query_stats'] = {'processed': 0, 'saved': 0, 'bypass_ai': False, 'abort': False}
-                        
-                        # 3. Force Rerun to update UI Red Status immediately
                         st.rerun()
                         break
 
-        # --- THIS WAS LIKELY THE PROBLEM AREA ---
         elif search_mode == "Paste citation / page text":
             refs = gemini_extract_from_text(st.session_state.paste_text, actual_model_id)
             papers = []
@@ -2799,19 +2886,34 @@ def run_cycle_logic(queries):
                     start_rec=row_start, stop_rec=row_stop
                 )
                 total_ann += a; total_save += s
+                
+                
+    # --- SAVE RESULTS TO DISK ---
+    # Filter out separators/headers to just get the paper data for this run
+    current_run_results = [
+        item for item in st.session_state.results_history 
+        if isinstance(item, dict) and item.get('type') not in ['separator', 'cycle_header']
+    ]
+    
+    # We use the last query processed as the label, or "Batch_Run"
+    label = queries[start_q_idx].get('query', 'Batch_Run') if isinstance(queries[start_q_idx], dict) else str(queries[start_q_idx])
+    
+    if current_run_results:
+        save_cycle_results_to_disk(label, st.session_state.results_history)
+    # ----------------------------
 
     st.success(f"Run Complete. Annotated: {total_ann}, Saved: {total_save}")
-    
     st.session_state.cycle_state = {
         "active": False, "query_idx": 0, "paper_offset": 0,
         "query_stats": {'processed': 0, 'saved': 0, 'bypass_ai': False, 'abort': False}
     }
 
-# --- RESULTS AREA ---
+
+# --- # --- RESULTS AREA ---
 st.markdown("---")
 st.subheader("📝 Results Log (Persists across runs)")
 
-# --- NEW: VIEW CONTROLS ---
+# --- VIEW CONTROLS ---
 v1, v2, v3, v4 = st.columns(4)
 v1.button("➕ Expand All", on_click=set_view_expand_all, use_container_width=True)
 v2.button("➖ Collapse All", on_click=set_view_collapse_all, use_container_width=True)
@@ -2820,9 +2922,47 @@ v4.button("⚠️ Expand Rejected", on_click=set_view_expand_others, use_contain
 # --------------------------
 
 if st.session_state.results_history:
-    # Use unique index key for correct display in history
+    # Iterate through history and render based on item type
     for idx, item in enumerate(st.session_state.results_history):
-        _display_paper_details(item, f"history_{idx}")
+        
+        # TYPE 1: THICK BLACK LINE SEPARATOR (New Series)
+        if item.get('type') == 'separator':
+            st.markdown("""
+                <div style='margin-top: 30px; margin-bottom: 30px;'>
+                    <hr style='border: 0; border-top: 6px solid #000000; border-radius: 5px;'>
+                    <h3 style='text-align: center; color: #333;'>🚀 NEW RUN SERIES INITIATED</h3>
+                </div>
+            """, unsafe_allow_html=True)
+            
+        # TYPE 2: CYCLE HEADER (Detailed Settings)
+        elif item.get('type') == 'cycle_header':
+            with st.container():
+                st.markdown(f"""
+                <div style='background-color: #f0f2f6; padding: 15px; border-radius: 10px; border-left: 6px solid #4CAF50; margin-bottom: 10px;'>
+                    <h2 style='margin:0; color: #1E1E1E;'>🔄 CYCLE: {item['query']}</h2>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Display 10+ Settings in a clean grid
+                s = item['settings']
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("Vector Min", s['vec_min'])
+                c2.metric("Comp Min", s['comp_min'])
+                c3.metric("Start Rec", s['start'])
+                c4.metric("Stop Rec", s['stop'])
+                c5.metric("Source", s['source'])
+                
+                c6, c7, c8, c9, c10 = st.columns(5)
+                c6.metric("Model", s['model'])
+                c7.metric("SpeedUp", str(s['speedup']))
+                c8.metric("FailFast", str(s['failfast']))
+                c9.metric("Collection", s['collection'])
+                c10.metric("Mode", s['mode'])
+                st.markdown("---")
+
+        # TYPE 3: PAPER RESULT (Standard Card)
+        else:
+            _display_paper_details(item, f"history_{idx}")
 else:
     st.info("No results yet. Click Go to start.")
 
